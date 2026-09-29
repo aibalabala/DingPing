@@ -69,12 +69,12 @@ jobs:
           cat > "$staging/安装说明.txt" <<'GUIDE'
           定屏 v0.5.5（构建 12）· Apple Silicon DMG
 
-          1. 双击“安装预编译版.command”。安装器会请求旧版退出，将
+          1. 双击“双击安装预编译版.command”。安装器会请求旧版退出，将
              /Applications/定屏.app 中经核对的旧副本移到废纸篓，
              替换个人 Applications 中的旧版，安装到 ~/Applications/定屏.app。
              若旧版无法退出或移除，请按终端提示处理后重试。
           2. 更新签名后安装器会引导你处理旧版辅助功能授权。
-          3. 若安装后仍显示等待授权，双击“修复定屏授权.command”。
+          3. 若安装后仍显示等待授权，双击“双击修复定屏授权.command”。
              它会核对新版本，仅重置定屏自己的授权记录，然后引导你手动移除旧条目，
              从个人 Applications 重新添加当前 App 并开启开关。
 
@@ -84,7 +84,13 @@ jobs:
           GUIDE
           dmg="$GITHUB_WORKSPACE/dist/DingPing-v0.5.5-macOS-arm64.dmg"
           hdiutil create -volname '定屏 v0.5.5' -srcfolder "$staging" -format UDZO -ov "$dmg"
-          hdiutil verify "$dmg"
+          verified=0
+          for attempt in 1 2 3 4 5; do
+            if hdiutil verify "$dmg"; then verified=1; break; fi
+            echo "DMG 校验暂未完成（第 $attempt 次），三秒后重试。" >&2
+            sleep 3
+          done
+          test "$verified" -eq 1
           ( cd dist && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256" )
 
       - name: Upload download artifact
@@ -114,7 +120,7 @@ jobs:
 
           恢复两个常用的等宽三格预设：左半屏完整、右侧上下；以及左侧上下、右半屏完整。保留原来的左大右上下和右大左上下，快捷键与已有保存方案不变。主页按钮改为两行七列，继续无滚动条。
 
-          下载 DMG 后双击安装脚本。它会请求旧版退出，替换个人 Applications 中的旧版，并将 /Applications 中经核对的旧副本移到废纸篓；布局设置保留。如果旧版本签名与本版不同，安装脚本会直接引导你修复授权；DMG 内另附“修复定屏授权.command”，应用中也有修复入口。只重置定屏的记录，系统开关仍需用户本人操作。
+          下载 DMG 后双击安装脚本。它会请求旧版退出，替换个人 Applications 中的旧版，并将 /Applications 中经核对的旧副本移到废纸篓；布局设置保留。如果旧版本签名与本版不同，安装脚本会直接引导你修复授权；DMG 内另附“双击修复定屏授权.command”，应用中也有修复入口。只重置定屏的记录，系统开关仍需用户本人操作。
 
           此 DMG 经 GitHub 的 macOS ARM64 runner 编译、运行核心测试并校验签名与磁盘映像；没有 Developer ID 签名或 Apple 公证，实际窗口行为仍需在用户 Mac 上验证。不同构建的临时签名可能需要重新授权。
           NOTES
