@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.2";
+static NSString *const FSVersion=@"0.5.3";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -27,6 +27,11 @@ static NSArray<NSDictionary *> *quickPresets(void) {
 }
 static NSRect nsrect(FSRect r) { return NSMakeRect(r.x,r.y,r.width,r.height); }
 static FSRect fsrect(NSRect r) { return (FSRect){r.origin.x,r.origin.y,r.size.width,r.size.height}; }
+static CGPoint mouseAXPoint(NSEvent *event) {
+    if(event.CGEvent)return CGEventGetLocation(event.CGEvent);
+    NSPoint point=event.locationInWindow; /* Global mouse events use screen coordinates. */
+    return CGPointMake(point.x,NSMaxY(NSScreen.screens.firstObject.frame)-point.y);
+}
 static NSTextField *label(NSString *text, NSRect frame, CGFloat size, BOOL bold) {
     NSTextField *v=[NSTextField labelWithString:text];
     v.frame=frame; v.font=bold?[NSFont systemFontOfSize:size weight:NSFontWeightSemibold]:[NSFont systemFontOfSize:size];
@@ -141,6 +146,12 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @end
 @implementation FSRestore @end
 
+@interface FSDragSnapshot : NSObject
+@property(nonatomic,strong) FSWindow *window;
+@property(nonatomic) FSRect frame;
+@end
+@implementation FSDragSnapshot @end
+
 @interface FSAssignment : NSObject
 @property(nonatomic,strong) FSWindow *window;
 @property(nonatomic) NSInteger slot;
@@ -180,10 +191,11 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) id inputMonitor;
 @property(nonatomic,strong) id localInputMonitor;
 @property(nonatomic,strong) FSWindow *observedWindow;
-@property(nonatomic,strong) FSWindow *draggedWindow;
-@property(nonatomic) FSRect dragStartFrame;
+@property(nonatomic,copy) NSArray<FSDragSnapshot *> *dragSnapshots;
 @property(nonatomic) BOOL dragMotionSeen;
 @property(nonatomic,copy) NSString *dragProfileID;
+@property(nonatomic) NSUInteger dragGeneration;
+@property(nonatomic,copy) NSString *lastDragResult;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableArray<FSAssignment *> *> *histories;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSDictionary<NSNumber *,FSWindow *> *> *runtimeCache;
 @property(nonatomic,strong) NSMutableArray<FSNewWindow *> *createdWindowMarkers;
@@ -267,6 +279,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot;
 - (void)beginWindowDrag:(NSEvent *)event;
 - (void)finishWindowDrag:(NSEvent *)event;
+- (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point profile:(NSString *)profileID;
 - (void)clearWindowDrag;
 - (void)noteCreatedWindow:(id)element pid:(pid_t)pid;
 - (NSInteger)createdWindowActiveSlot:(FSWindow *)window;
@@ -401,7 +414,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSApp *app=weakSelf;
         if(!app)return;
         if(event.type==NSEventTypeLeftMouseDragged) {
-            if(app.draggedWindow)app.dragMotionSeen=YES;
+            if(app.dragSnapshots.count)app.dragMotionSeen=YES;
             return;
         }
         if(event.type==NSEventTypeLeftMouseUp) {[app finishWindowDrag:event];return;}
@@ -419,6 +432,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         }
         if(event.type==NSEventTypeLeftMouseDown)[app beginWindowDrag:event];
     }];
+    self.lastDragResult=self.inputMonitor?@"尚未尝试拖动":@"系统未提供全局鼠标事件监听";
     self.localInputMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown|NSEventMaskRightMouseDown|NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event){
         FSApp *app=weakSelf;
         if(app && app->_placement.switching)[app cancelActivation];
@@ -548,7 +562,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     return slot;
 }
 - (void)clearWindowDrag {
-    self.draggedWindow=nil;self.dragProfileID=nil;self.dragMotionSeen=NO;
+    self.dragSnapshots=nil;self.dragProfileID=nil;self.dragMotionSeen=NO;
+    self.dragGeneration++;
 }
 - (void)beginWindowDrag:(NSEvent *)event {
     [self clearWindowDrag];
@@ -556,42 +571,83 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
        self.choosingWindow || self.menuOpen || self.sleeping || self.sessionInactive ||
        NSApp.modalWindow || !AXIsProcessTrusted() || !FSScreenWithID(self.profile[@"display"]))return;
-    CGEventRef cg=event.CGEvent;if(!cg)return;
-    CGPoint point=CGEventGetLocation(cg);
-    FSWindow *window=FSWindowAtPoint(point);FSRect frame;
-    if(!window || ![window readFrame:&frame] || !FSTitleCandidate(frame,point.x,point.y))return;
-    self.draggedWindow=window;self.dragStartFrame=frame;self.dragProfileID=self.profile[@"id"];
+    CGPoint point=mouseAXPoint(event);
+    NSMutableArray<FSDragSnapshot *> *snapshots=[NSMutableArray new];
+    FSWindow *hit=FSWindowAtPoint(point);FSRect frame;
+    if(!hit) {
+        pid_t pid=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+        hit=FSFocusedWindow(pid);
+    }
+    if(hit && [hit readFrame:&frame] && FSPassiveDragCandidate(frame,point.x,point.y)) {
+        FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=hit;snapshot.frame=frame;
+        [snapshots addObject:snapshot];
+    }
+    /* AX hit testing can return only a toolbar child or no window at all.
+       Track managed windows under the pointer; only the one that really moves
+       can be used when the mouse is released. */
+    NSArray *visible=FSOnScreenRows();
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *window=self.runtime[@(i)];BOOL known=NO;
+        for(FSDragSnapshot *snapshot in snapshots)if([window sameWindow:snapshot.window]){known=YES;break;}
+        if(known || !window || ![window isUsable] || ![window isOnScreen:visible] ||
+           ![window readFrame:&frame] || !FSPassiveDragCandidate(frame,point.x,point.y))continue;
+        FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=window;snapshot.frame=frame;
+        [snapshots addObject:snapshot];
+    }
+    self.dragSnapshots=snapshots;self.dragProfileID=snapshots.count?self.profile[@"id"]:nil;
+    self.lastDragResult=snapshots.count?@"已识别窗口，等待拖动":@"未识别起点窗口；请抓住标题栏或工具栏空白处";
 }
 - (void)finishWindowDrag:(NSEvent *)event {
-    FSWindow *window=self.draggedWindow;FSRect start=self.dragStartFrame;
+    NSArray<FSDragSnapshot *> *snapshots=self.dragSnapshots;
     BOOL moved=self.dragMotionSeen;
     NSString *profileID=self.dragProfileID;
     [self clearWindowDrag];
-    if(!window || !moved || !self.locked || _placement.switching ||
+    if(!snapshots.count || !moved || !self.locked || _placement.switching ||
        [self.profile[@"preventDrag"] boolValue] || ![profileID isEqual:self.profile[@"id"]] ||
        self.choosingWindow || self.menuOpen || self.sleeping || self.sessionInactive ||
        NSApp.modalWindow || !AXIsProcessTrusted())return;
-    CGEventRef cg=event.CGEvent;if(!cg)return;
-    FSRect actual;
-    if(![window isUsable] || ![window readFrame:&actual] || !FSWindowWasDragged(start,actual))return;
+    CGPoint point=mouseAXPoint(event);
+    self.lastMouseDown=NSDate.timeIntervalSinceReferenceDate;
+    self.quietUntil=self.lastMouseDown+.8;
+    self.lastDragResult=@"已收到拖动，等待目标窗口完成移动";
+    NSUInteger generation=self.dragGeneration;
+    __weak FSApp *weakSelf=self;
+    /* A global event monitor runs asynchronously. Let the target app complete
+       the move before reading its accessibility frame and reassigning zones. */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.12*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        FSApp *app=weakSelf;
+        if(app && app.dragGeneration==generation)[app commitWindowDrag:snapshots at:point profile:profileID];
+    });
+}
+- (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point profile:(NSString *)profileID {
+    if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
+       ![profileID isEqual:self.profile[@"id"]] || self.choosingWindow || self.menuOpen ||
+       self.sleeping || self.sessionInactive || NSApp.modalWindow || !AXIsProcessTrusted())return;
+    FSWindow *window=nil;FSRect start={0},actual={0};
+    for(FSDragSnapshot *snapshot in snapshots) {
+        FSRect movedFrame;
+        if([snapshot.window isUsable] && [snapshot.window readFrame:&movedFrame] &&
+           FSWindowWasDragged(snapshot.frame,movedFrame)) {
+            window=snapshot.window;start=snapshot.frame;actual=movedFrame;break;
+        }
+    }
+    if(!window){self.lastDragResult=@"收到鼠标拖动，但窗口位置没有变化；请拖动标题栏空白处";return;}
     NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
     FSRect zones[4];int count=FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(screen),
                                           [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones);
-    CGPoint point=CGEventGetLocation(cg);
-    int destination=FSDropZoneAt(zones,count,point.x,point.y);
-    self.lastMouseDown=NSDate.timeIntervalSinceReferenceDate;
-    self.quietUntil=self.lastMouseDown+.5;
-    if(destination<0)return; /* The ordinary layout check restores a managed window. */
     int source=-1;unsigned pinned=0;
     for(int i=0;i<count;i++) {
         if([self slotPinned:i])pinned|=1u<<i;
         if([window sameWindow:self.runtime[@(i)]])source=i;
     }
+    int destination=FSDropDestination(zones,count,source,point.x,point.y,actual);
+    if(destination<0){self.lastDragResult=@"松手位置在分区外，原分区保持不变";return;}
     /* A pin in a temporarily hidden zone still owns its exact window. */
     for(int i=count;i<4;i++)if([self slotPinned:i]) {
         FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=self.profile[@"bindings"][i];
         if((hidden && [window sameWindow:hidden]) ||
            (!hidden && [window.bundleID isEqual:binding[@"bundle"]] && [window.title isEqual:binding[@"title"]])) {
+            self.lastDragResult=@"窗口固定在当前布局未显示的分区，未换位";
             [window moveTo:start error:nil];
             [self setMessage:@"这个窗口固定在当前布局暂未显示的分区；先取消固定再拖动换位。"];
             return;
@@ -599,13 +655,15 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     FSWindow *occupant=self.runtime[@(destination)];
     FSDropAction action=FSDropChooseAction(count,source,destination,pinned,occupant!=nil);
-    if(action==FSDropIgnore)return;
+    if(action==FSDropIgnore){self.lastDragResult=@"窗口仍在原分区；把窗口拖到目标分区再松手";return;}
     if(action==FSDropBlocked) {
+        self.lastDragResult=@"目标分区或来源窗口已固定，未换位";
         [window moveTo:start error:nil];
         [self setMessage:@"固定的窗口或分区不能拖动换位；请先取消「固定此窗口」。"];
         return;
     }
     if(action==FSDropSwap && (![occupant isUsable] || ![occupant isOnScreen:FSOnScreenRows()])) {
+        self.lastDragResult=@"目标分区窗口暂不可见，未交换";
         [window moveTo:start error:nil];
         [self setMessage:@"目标分区窗口暂不可见，未交换；请先显示该窗口。"];
         return;
@@ -626,8 +684,12 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(action==FSDropSwap)[self arrangeSlot:source manual:YES];
     [self refreshDragTargets];
     if(self.settingsWindow.visible){self.windowChoices=FSAvailableWindows();[self refreshControls];}
-    if([self.suspended containsIndex:destination] || (source>=0 && [self.suspended containsIndex:source]))return;
+    if([self.suspended containsIndex:destination] || (source>=0 && [self.suspended containsIndex:source])) {
+        self.lastDragResult=@"分区已更新，但窗口拒绝目标尺寸；请增大分区或减少间距";
+        return;
+    }
     NSString *detail=action==FSDropSwap?@"已与原窗口交换":action==FSDropReplace?@"原窗口仍保持打开":@"已移动";
+    self.lastDragResult=[NSString stringWithFormat:@"已换到区域 %d",destination+1];
     [self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · %@。",window.appName,destination+1,detail]];
 }
 - (void)scheduleAutomaticPlacement {
@@ -643,7 +705,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
     if(!self.locked || _placement.switching || self.sleeping || self.sessionInactive || self.menuOpen ||
        self.choosingWindow || NSApp.modalWindow || now<self.quietUntil ||
-       self.draggedWindow || NSEvent.pressedMouseButtons!=0 || now-self.lastMouseDown<.25 || !AXIsProcessTrusted())return;
+       self.dragSnapshots.count || NSEvent.pressedMouseButtons!=0 || now-self.lastMouseDown<.25 || !AXIsProcessTrusted())return;
     NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
     NSRunningApplication *front=NSWorkspace.sharedWorkspace.frontmostApplication;
     if(!front || front.processIdentifier==getpid() || front.activationPolicy!=NSApplicationActivationPolicyRegular)return;
@@ -1721,10 +1783,13 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [self finishPicking];
     BOOL trusted=AXIsProcessTrusted();
     NSBundle *bundle=NSBundle.mainBundle;
+    NSString *dragStatus=!self.locked?@"自由模式下不换位":
+        ([self.profile[@"preventDrag"] boolValue]?@"当前选择阻止标题栏拖动；改为「拖到分区换位」后再试":
+         (self.lastDragResult?:@"尚无记录"));
     NSString *diagnostic=[NSString stringWithFormat:
-        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
+        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
         FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
-        trusted?@"已授权":@"未授权",bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
+        trusted?@"已授权":@"未授权",dragStatus,bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
         trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
         @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从个人 Applications 重新添加这份应用并开启。"];
     NSAlert *alert=[NSAlert new];alert.messageText=@"定屏 · 权限诊断";alert.informativeText=diagnostic;

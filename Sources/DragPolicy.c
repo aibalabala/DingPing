@@ -29,6 +29,13 @@ bool FSTitleCandidate(FSRect w,double x,double y) {
     return x>=w.x+80 && x<w.x+w.width-20 && y>=w.y+3 && y<w.y+38;
 }
 
+bool FSPassiveDragCandidate(FSRect w,double x,double y) {
+    if(!isfinite(x)||!isfinite(y)||!isfinite(w.x)||!isfinite(w.y)||
+       !isfinite(w.width)||!isfinite(w.height)||w.width<160||w.height<80)return false;
+    double band=fmin(100,fmax(56,w.height*.2));
+    return x>=w.x+8 && x<w.x+w.width-8 && y>=w.y+3 && y<w.y+band;
+}
+
 bool FSWindowWasDragged(FSRect before, FSRect after) {
     if(!isfinite(before.x)||!isfinite(before.y)||!isfinite(after.x)||!isfinite(after.y)||
        !isfinite(before.width)||!isfinite(before.height)||!isfinite(after.width)||!isfinite(after.height))return false;
@@ -44,6 +51,15 @@ int FSDropZoneAt(const FSRect zones[4],int count,double x,double y) {
            z.width>0&&z.height>0&&x>=z.x&&x<z.x+z.width&&y>=z.y&&y<z.y+z.height)return i;
     }
     return -1;
+}
+
+int FSDropDestination(const FSRect zones[4],int count,int source,
+                      double mouseX,double mouseY,FSRect droppedWindow) {
+    int mouse=FSDropZoneAt(zones,count,mouseX,mouseY);
+    if(mouse<0 || mouse!=source || source<0)return mouse;
+    int center=FSDropZoneAt(zones,count,droppedWindow.x+droppedWindow.width/2,
+                                          droppedWindow.y+droppedWindow.height/2);
+    return center>=0 && center!=source?center:mouse;
 }
 
 FSDropAction FSDropChooseAction(int count,int source,int target,unsigned pinned,bool targetOccupied) {
