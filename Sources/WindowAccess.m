@@ -1,4 +1,5 @@
 #import "WindowAccess.h"
+#include "DragPolicy.h"
 #include <math.h>
 #include <unistd.h>
 
@@ -77,7 +78,7 @@ static BOOL readAXFrame(AXUIElementRef element, FSRect *frame) {
         CGRect b;
         NSDictionary *bounds=row[(__bridge NSString *)kCGWindowBounds];
         if (bounds && CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bounds,&b) &&
-            FSRectNear(f,(FSRect){b.origin.x,b.origin.y,b.size.width,b.size.height},3)) return YES;
+            FSVisibleFrameMatch(f,(FSRect){b.origin.x,b.origin.y,b.size.width,b.size.height})) return YES;
     }
     return NO;
 }
@@ -200,38 +201,90 @@ NSString *FSDisplayID(NSScreen *screen) {
     CFRelease(uuid); return identifier;
 }
 
-FSWindow *FSWindowAtPointWithChrome(CGPoint point, BOOL *plainChrome) {
+FSWindow *FSWindowAtPointWithChrome(CGPoint point, FSRect *visibleFrame,
+                                    BOOL *plainChrome, NSString **reason) {
     if(plainChrome)*plainChrome=NO;
+    if(visibleFrame)*visibleFrame=(FSRect){0};
+    if(reason)*reason=@"辅助功能未授权";
     if(!AXIsProcessTrusted())return nil;
+    /* The onscreen list is front to back. Bind the AX element to the actual
+       layer-zero window below the pointer before accepting a drag source. */
+    FSRect cgFrame={0};pid_t topPID=0;
+    for(NSDictionary *row in FSOnScreenRows()) {
+        if([row[(__bridge NSString *)kCGWindowLayer] intValue]!=0)continue;
+        CGRect bounds;NSDictionary *value=row[(__bridge NSString *)kCGWindowBounds];
+        if(!value || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)value,&bounds) ||
+           !CGRectContainsPoint(bounds,point))continue;
+        topPID=[row[(__bridge NSString *)kCGWindowOwnerPID] intValue];
+        cgFrame=(FSRect){bounds.origin.x,bounds.origin.y,bounds.size.width,bounds.size.height};
+        break;
+    }
+    if(!topPID){if(reason)*reason=@"鼠标下没有可见的普通窗口；请确认当前桌面和标题栏";return nil;}
+    if(topPID==getpid()){if(reason)*reason=@"鼠标下是定屏的窗口；请拖动目标应用的标题栏";return nil;}
+    if(visibleFrame)*visibleFrame=cgFrame;
+    NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:topPID];
+    if(!app || app.activationPolicy!=NSApplicationActivationPolicyRegular || app.hidden) {
+        if(reason)*reason=@"鼠标下的窗口不支持分屏";
+        return nil;
+    }
     AXUIElementRef system=AXUIElementCreateSystemWide(),hit=NULL;
     AXUIElementSetMessagingTimeout(system,.18);
     AXError result=AXUIElementCopyElementAtPosition(system,point.x,point.y,&hit);
     CFRelease(system);
-    if(result!=kAXErrorSuccess || !hit){if(hit)CFRelease(hit);return nil;}
-    AXUIElementSetMessagingTimeout(hit,.18);
-    id role=readAX(hit,kAXRoleAttribute);
-    id element=[role isEqual:(__bridge NSString *)kAXWindowRole]?(__bridge id)hit:readAX(hit,kAXWindowAttribute);
-    FSWindow *window=nil;
-    if(element && CFGetTypeID((__bridge CFTypeRef)element)==AXUIElementGetTypeID()) {
+    id role=nil;id hitWindow=nil;
+    if(result==kAXErrorSuccess && hit) {
+        AXUIElementSetMessagingTimeout(hit,.18);
+        role=readAX(hit,kAXRoleAttribute);
+        hitWindow=[role isEqual:(__bridge NSString *)kAXWindowRole]?(__bridge id)hit:readAX(hit,kAXWindowAttribute);
+        if(!hitWindow)hitWindow=readAX(hit,kAXTopLevelUIElementAttribute);
+    }
+    /* A toolbar child may expose neither AXWindow nor a useful hit result.
+       Enumerate just this frontmost PID, then choose the closest visible frame. */
+    AXUIElementRef axApp=AXUIElementCreateApplication(topPID);
+    AXUIElementSetMessagingTimeout(axApp,.18);
+    id windows=readAX(axApp,kAXWindowsAttribute);
+    CFRelease(axApp);
+    FSWindow *best=nil;double bestScore=-1;
+    NSMutableArray *candidates=[NSMutableArray new];
+    if([windows isKindOfClass:NSArray.class])[candidates addObjectsFromArray:windows];
+    if(hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID()) {
+        BOOL listed=NO;
+        for(id candidate in candidates)if(CFGetTypeID((__bridge CFTypeRef)candidate)==AXUIElementGetTypeID() &&
+            CFEqual((__bridge CFTypeRef)candidate,(__bridge CFTypeRef)hitWindow)){listed=YES;break;}
+        if(!listed)[candidates addObject:hitWindow];
+    }
+    for(id element in candidates) {
+        if(CFGetTypeID((__bridge CFTypeRef)element)!=AXUIElementGetTypeID())continue;
         AXUIElementRef ax=(__bridge AXUIElementRef)element;
         AXUIElementSetMessagingTimeout(ax,.18);
         pid_t pid=0;
-        if(AXUIElementGetPid(ax,&pid)==kAXErrorSuccess && pid>0 && pid!=getpid()) {
-            NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-            if(app.activationPolicy==NSApplicationActivationPolicyRegular)window=makeWindow(ax,app);
-        }
+        if(AXUIElementGetPid(ax,&pid)!=kAXErrorSuccess || pid!=topPID)continue;
+        FSWindow *window=makeWindow(ax,app);FSRect frame;
+        if(![window isUsable] || ![window readFrame:&frame] ||
+           !FSVisibleFrameMatch(frame,cgFrame))continue;
+        double intersection=FSIntersectionArea(frame,cgFrame);
+        double score=intersection/(frame.width*frame.height+cgFrame.width*cgFrame.height-intersection);
+        if(hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
+           CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)element))score+=1;
+        if(score>bestScore){best=window;bestScore=score;}
     }
-    BOOL usable=window && [window isUsable] && [window isOnScreen:FSOnScreenRows()];
-    if(usable && plainChrome)
+    BOOL matchedHit=hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
+        best && CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)best.element);
+    if(hit)CFRelease(hit);
+    if(!best) {
+        if(reason)*reason=@"已看到鼠标下的窗口，但无法匹配可调整的辅助功能窗口；请确认不是全屏或弹窗";
+        return nil;
+    }
+    if(plainChrome && matchedHit)
         *plainChrome=[role isEqual:(__bridge NSString *)kAXWindowRole] ||
                      [role isEqual:(__bridge NSString *)kAXToolbarRole] ||
                      [role isEqual:(__bridge NSString *)kAXGroupRole] ||
                      [role isEqual:(__bridge NSString *)kAXStaticTextRole];
-    CFRelease(hit);
-    return usable?window:nil;
+    if(reason)*reason=@"已识别鼠标下的窗口";
+    return best;
 }
 
-FSWindow *FSWindowAtPoint(CGPoint point) {return FSWindowAtPointWithChrome(point,NULL);}
+FSWindow *FSWindowAtPoint(CGPoint point) {return FSWindowAtPointWithChrome(point,NULL,NULL,NULL);}
 
 NSScreen *FSScreenForFrame(FSRect frame) {
     double top=NSMaxY(NSScreen.screens.firstObject.frame),bestArea=0;

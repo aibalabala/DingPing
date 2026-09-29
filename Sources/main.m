@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.6";
+static NSString *const FSVersion=@"0.5.7";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -183,6 +183,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @interface FSRestore : NSObject
 @property(nonatomic,strong) FSWindow *window;
 @property(nonatomic) FSRect frame;
+@property(nonatomic) FSRect visibleFrame;
 @end
 @implementation FSRestore @end
 
@@ -337,6 +338,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)togglePin:(NSButton *)sender;
 - (void)pinFocusedSlot:(NSMenuItem *)sender;
 - (void)unpinFromMenu:(NSMenuItem *)sender;
+- (void)showTranslocatedWarning;
 @end
 
 static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
@@ -515,6 +517,16 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
        [NSUserDefaults.standardUserDefaults boolForKey:@"showSettingsOnLaunch"])[self showSettings:nil];
     [self syncDragGuard:YES];
     [self updateStatus];
+    if([NSBundle.mainBundle.bundlePath containsString:@"/AppTranslocation/"])
+        dispatch_async(dispatch_get_main_queue(),^{[self showTranslocatedWarning];});
+}
+- (void)showTranslocatedWarning {
+    NSAlert *alert=[NSAlert new];
+    alert.messageText=@"请先安装定屏，再从「应用程序」启动";
+    alert.informativeText=@"当前打开的是 macOS 隔离的临时副本。请退出定屏，在下载的 DMG 顶层双击「双击安装预编译版.command」；完成后从 ~/Applications/定屏.app 启动。已安装的旧版不会因直接打开 DMG 内的 App 而升级。";
+    [alert addButtonWithTitle:@"退出并安装"];[alert addButtonWithTitle:@"暂时继续"];
+    [NSApp activateIgnoringOtherApps:YES];
+    if([alert runModal]==NSAlertFirstButtonReturn)[NSApp terminate:nil];
 }
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
     [self showSettings:nil];return YES;
@@ -621,51 +633,31 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)beginWindowDrag:(NSEvent *)event {
     [self clearWindowDrag];
     self.lastMouseDown=NSDate.timeIntervalSinceReferenceDate;
-    if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
-       self.choosingWindow || self.menuOpen || self.sleeping || self.sessionInactive ||
-       NSApp.modalWindow || !AXIsProcessTrusted() || !FSScreenWithID(self.profile[@"display"]))return;
+    if(!self.locked || [self.profile[@"preventDrag"] boolValue])return;
+    if(_placement.switching || self.choosingWindow || self.menuOpen || self.sleeping ||
+       self.sessionInactive || NSApp.modalWindow || !FSScreenWithID(self.profile[@"display"])) {
+        self.lastDragResult=@"当前正在切换布局、打开菜单或目标屏幕不可用，未开始拖动识别";
+        return;
+    }
+    if(!AXIsProcessTrusted()){self.lastDragResult=@"辅助功能未授权";return;}
     CGPoint point=mouseAXPoint(event);
     self.dragStartPoint=point;
-    NSMutableArray<FSDragSnapshot *> *snapshots=[NSMutableArray new];
-    NSArray *visible=FSOnScreenRows();
-    pid_t topPID=0;FSRect topFrame={0};
-    /* AX hit testing can miss a toolbar child. The frontmost regular window
-       under the pointer still identifies which managed window was grabbed. */
-    for(NSDictionary *row in visible) {
-        if([row[(__bridge NSString *)kCGWindowLayer] intValue]!=0)continue;
-        CGRect bounds;NSDictionary *value=row[(__bridge NSString *)kCGWindowBounds];
-        if(!value || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)value,&bounds) ||
-           !CGRectContainsPoint(bounds,point))continue;
-        topPID=[row[(__bridge NSString *)kCGWindowOwnerPID] intValue];
-        topFrame=(FSRect){bounds.origin.x,bounds.origin.y,bounds.size.width,bounds.size.height};
-        break;
+    BOOL plainChrome=NO;FSRect visibleFrame={0},frame={0};NSString *reason=nil;
+    FSWindow *hit=FSWindowAtPointWithChrome(point,&visibleFrame,&plainChrome,&reason);
+    if(!hit){self.lastDragResult=reason;return;}
+    if(!FSPassiveDragCandidate(visibleFrame,point.x,point.y)) {
+        self.lastDragResult=@"已识别窗口；起点位于内容区或边框，请抓住顶部空白处";
+        return;
     }
-    BOOL plainChrome=NO;
-    FSWindow *hit=FSWindowAtPointWithChrome(point,&plainChrome);FSRect frame;
-    if(!hit) {
-        pid_t pid=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
-        hit=FSFocusedWindow(pid);
+    if(![hit readFrame:&frame]) {
+        self.lastDragResult=@"已匹配窗口，但无法读取辅助功能坐标";
+        return;
     }
-    if(hit && [hit readFrame:&frame] && FSPassiveDragCandidate(frame,point.x,point.y)) {
-        FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=hit;snapshot.frame=frame;
-        snapshot.pointerEligible=topPID==hit.pid && FSRectNear(frame,topFrame,3);
-        snapshot.plainChrome=plainChrome;
-        [snapshots addObject:snapshot];
-    }
-    /* AX hit testing can return only a toolbar child or no window at all.
-       Track managed windows under the pointer; only the one that really moves
-       can be used when the mouse is released. */
-    for(int i=0;i<self.zoneCount;i++) {
-        FSWindow *window=self.runtime[@(i)];BOOL known=NO;
-        for(FSDragSnapshot *snapshot in snapshots)if([window sameWindow:snapshot.window]){known=YES;break;}
-        if(known || !window || ![window isUsable] || ![window isOnScreen:visible] ||
-           ![window readFrame:&frame] || !FSPassiveDragCandidate(frame,point.x,point.y))continue;
-        FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=window;snapshot.frame=frame;
-        snapshot.pointerEligible=topPID==window.pid && FSRectNear(frame,topFrame,3);
-        [snapshots addObject:snapshot];
-    }
-    self.dragSnapshots=snapshots;self.dragProfileID=snapshots.count?self.profile[@"id"]:nil;
-    self.lastDragResult=snapshots.count?@"已识别窗口，等待拖动":@"未识别起点窗口；请抓住标题栏或工具栏空白处";
+    FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=hit;snapshot.frame=frame;
+    snapshot.visibleFrame=visibleFrame;snapshot.pointerEligible=YES;
+    snapshot.plainChrome=plainChrome;
+    self.dragSnapshots=@[snapshot];self.dragProfileID=self.profile[@"id"];
+    self.lastDragResult=@"已识别鼠标下的窗口，等待拖动";
 }
 - (void)updateDragOverlay:(NSEvent *)event {
     if(!self.locked || [self.profile[@"preventDrag"] boolValue] || !self.dragSnapshots.count ||
@@ -678,7 +670,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSRect frame;
         if([snapshot.window readFrame:&frame] &&
            (FSWindowWasDragged(snapshot.frame,frame) ||
-            FSWindowTitleMoved(snapshot.frame,frame,self.dragStartPoint.x,self.dragStartPoint.y))) {
+            FSWindowTitleMovedFromVisible(snapshot.frame,frame,snapshot.visibleFrame,
+                                          self.dragStartPoint.x,self.dragStartPoint.y))) {
             snapshot.movedDuringDrag=YES;snapshot.movedFrame=frame;
             moving=snapshot.window;actual=frame;break;
         }
@@ -693,7 +686,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         BOOL managed=NO;
         for(int i=0;i<self.zoneCount;i++)if([snapshot.window sameWindow:self.runtime[@(i)]]){managed=YES;break;}
         if(managed && snapshot.pointerEligible &&
-           FSPointerDragIntent(snapshot.frame,0,snapshot.plainChrome,
+           FSPointerDragIntent(snapshot.visibleFrame,0,snapshot.plainChrome,
                                           self.dragStartPoint.x,self.dragStartPoint.y,
                                           point.x,point.y)) {
             moving=snapshot.window;actual=snapshot.frame;
@@ -778,7 +771,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSRect movedFrame;
         if([snapshot.window isUsable] && [snapshot.window readFrame:&movedFrame] &&
            (FSWindowWasDragged(snapshot.frame,movedFrame) ||
-            FSWindowTitleMoved(snapshot.frame,movedFrame,startPoint.x,startPoint.y))) {
+            FSWindowTitleMovedFromVisible(snapshot.frame,movedFrame,snapshot.visibleFrame,
+                                          startPoint.x,startPoint.y))) {
             window=snapshot.window;start=snapshot.frame;actual=movedFrame;break;
         }
     }
@@ -793,7 +787,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         NSInteger source=-1;
         for(int i=0;i<self.zoneCount;i++)if([snapshot.window sameWindow:self.runtime[@(i)]]){source=i;break;}
         if(!snapshot.pointerEligible ||
-           !FSPointerDragIntent(snapshot.frame,(int)source,snapshot.plainChrome,
+           !FSPointerDragIntent(snapshot.visibleFrame,(int)source,snapshot.plainChrome,
                                 startPoint.x,startPoint.y,point.x,point.y) ||
            ![snapshot.window isUsable])continue;
         FSRect current;if(![snapshot.window readFrame:&current])continue;
@@ -1964,6 +1958,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         trusted?@"已授权":@"未授权",dragStatus,bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
         trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
         @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从个人 Applications 重新添加这份应用并开启。"];
+    if([bundle.bundlePath containsString:@"/AppTranslocation/"])
+        diagnostic=[diagnostic stringByAppendingString:@"\n\n当前正在运行 DMG 隔离的临时副本。请退出，在 DMG 顶层双击「双击安装预编译版.command」，再从 ~/Applications/定屏.app 启动。"];
     NSAlert *alert=[NSAlert new];alert.messageText=@"定屏 · 权限诊断";alert.informativeText=diagnostic;
     [alert addButtonWithTitle:@"关闭"];[alert addButtonWithTitle:@"在 Finder 中显示"];[alert addButtonWithTitle:@"复制诊断"];
     [NSApp activateIgnoringOtherApps:YES];

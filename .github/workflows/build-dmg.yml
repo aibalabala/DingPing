@@ -30,8 +30,8 @@ jobs:
           app="$RUNNER_TEMP/DingPing-build/定屏.app"
           codesign --verify --deep --strict "$app"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = local.dingping.fixedsplit
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = 0.5.6
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = 13
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = 0.5.7
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = 14
           test -x "$app/Contents/Resources/修复定屏授权.command"
           bash -n "$app/Contents/Resources/修复定屏授权.command"
           cmp Installer/repair_accessibility.command "$app/Contents/Resources/修复定屏授权.command"
@@ -59,17 +59,19 @@ jobs:
         run: |
           set -euo pipefail
           staging="$RUNNER_TEMP/DingPing-dmg"
-          mkdir -p "$staging" dist
-          ditto "$RUNNER_TEMP/DingPing-build/定屏.app" "$staging/定屏.app"
+          mkdir -p "$staging/安装资源" dist
+          ditto "$RUNNER_TEMP/DingPing-build/定屏.app" "$staging/安装资源/定屏.app"
+          test -d "$staging/安装资源/定屏.app"
+          test ! -e "$staging/定屏.app"
           cp Installer/install_prebuilt.command "$staging/双击安装预编译版.command"
           chmod 755 "$staging/双击安装预编译版.command"
           cp Installer/common.sh "$staging/.dingping-install.sh"
           cp Installer/repair_accessibility.command "$staging/双击修复定屏授权.command"
           chmod 755 "$staging/双击修复定屏授权.command"
           cat > "$staging/安装说明.txt" <<'GUIDE'
-          定屏 v0.5.6（构建 13）· Apple Silicon DMG
+          定屏 v0.5.7（构建 14）· Apple Silicon DMG
 
-          1. 双击“双击安装预编译版.command”。安装器会请求旧版退出，将
+          1. 在本 DMG 顶层双击“双击安装预编译版.command”；不要从“安装资源”直接运行 App。安装器会请求旧版退出，将
              /Applications/定屏.app 中经核对的旧副本移到废纸篓，
              替换个人 Applications 中的旧版，安装到 ~/Applications/定屏.app。
              若旧版无法退出或移除，请按终端提示处理后重试。
@@ -81,9 +83,10 @@ jobs:
           这份程序使用临时签名，没有 Apple Developer ID 公证；macOS 可能提示需要手动确认打开。
           已装好同一个构建时安装器不会反复替换或签名。
           仅移除经核对应用标识的旧程序，不清除布局和偏好设置。
+          如权限诊断显示 /AppTranslocation/，说明启动的是隔离的临时副本；请退出并重新运行顶层安装器。
           GUIDE
-          dmg="$GITHUB_WORKSPACE/dist/DingPing-v0.5.6-macOS-arm64.dmg"
-          hdiutil create -volname '定屏 v0.5.6' -srcfolder "$staging" -format UDZO -ov "$dmg"
+          dmg="$GITHUB_WORKSPACE/dist/DingPing-v0.5.7-macOS-arm64.dmg"
+          hdiutil create -volname '定屏 v0.5.7' -srcfolder "$staging" -format UDZO -ov "$dmg"
           verified=0
           for attempt in 1 2 3 4 5; do
             if hdiutil verify "$dmg"; then verified=1; break; fi
@@ -96,35 +99,35 @@ jobs:
       - name: Upload download artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DingPing-v0.5.6-macOS-arm64
+          name: DingPing-v0.5.7-macOS-arm64
           path: |
             dist/*.dmg
             dist/*.sha256
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish first successful v0.5.6 build
+      - name: Publish first successful v0.5.7 build
         if: github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag=v0.5.6
+          tag=v0.5.7
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag exists. Keep its signed DMG unchanged; this run is available as an Actions artifact."
             exit 0
           fi
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          定屏 v0.5.6（构建 13），适用于 Apple Silicon Mac，要求 macOS 13 或更新版本。
+          定屏 v0.5.7（构建 14），适用于 Apple Silicon Mac，要求 macOS 13 或更新版本。
 
-          修复拖动松手后回弹而没有换位：保留拖动期间的有效窗口位移；对于已纳入布局的窗口，标题栏起点和明确落点可在辅助功能坐标滞后时完成分配。拖动起点须属于最前方窗口，固定窗口和固定分区仍受保护；权限诊断标明本次是窗口位移还是标题栏落点。
+          修复拖动起点无法识别：根据鼠标下最前面的屏幕窗口，匹配可操作的辅助功能窗口，允许屏幕与辅助功能的窗口边界有差异；诊断区分屏幕窗口、匹配与标题区域问题。固定窗口和固定分区仍受保护。
 
-          下载 DMG 后双击安装脚本。它会请求旧版退出，替换个人 Applications 中的旧版，并将 /Applications 中经核对的旧副本移到废纸篓；布局设置保留。如果旧版本签名与本版不同，安装脚本会直接引导你修复授权；DMG 内另附“双击修复定屏授权.command”，应用中也有修复入口。只重置定屏的记录，系统开关仍需用户本人操作。
+          下载 DMG 后双击顶层的安装脚本，不要直接打开“安装资源”中的 App。临时运行时会提醒先安装。它会请求旧版退出，替换个人 Applications 中的旧版，并将 /Applications 中经核对的旧副本移到废纸篓；布局设置保留。如果旧版本签名与本版不同，安装脚本会直接引导你修复授权；DMG 内另附“双击修复定屏授权.command”，应用中也有修复入口。只重置定屏的记录，系统开关仍需用户本人操作。
 
           此 DMG 经 GitHub 的 macOS ARM64 runner 编译、运行核心测试并校验签名与磁盘映像；没有 Developer ID 签名或 Apple 公证，实际窗口行为仍需在用户 Mac 上验证。不同构建的临时签名可能需要重新授权。
           NOTES
           gh release create "$tag" dist/*.dmg dist/*.sha256 \
             --target "$GITHUB_SHA" \
-            --title '定屏 v0.5.6 · macOS Apple Silicon DMG' \
+            --title '定屏 v0.5.7 · macOS Apple Silicon DMG' \
             --notes-file "$RUNNER_TEMP/release-notes.md"

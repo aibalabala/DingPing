@@ -21,7 +21,7 @@ echo "[1/4] 检查分区、拖动和自动归位规则"
   -o "$build_dir/layout_tests"
 "$build_dir/layout_tests"
 /usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
-  "$project_dir/Sources/DragPolicy.c" "$project_dir/Tests/drag_policy_tests.c" \
+  "$project_dir/Sources/Layout.c" "$project_dir/Sources/DragPolicy.c" "$project_dir/Tests/drag_policy_tests.c" \
   -o "$build_dir/drag_policy_tests"
 "$build_dir/drag_policy_tests"
 /usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -pedantic \

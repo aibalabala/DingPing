@@ -1,5 +1,5 @@
 #!/bin/bash
-# Distributed next to the prebuilt App inside the GitHub DMG.
+# The prebuilt App is kept in an install-only folder inside the GitHub DMG.
 set -euo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
@@ -10,7 +10,7 @@ dmg_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "$dmg_dir/.dingping-install.sh" ]]; then echo 'DMG 缺少安装组件，请重新下载完整映像。'; exit 1; fi
 source "$dmg_dir/.dingping-install.sh"
 DP_BUNDLE_ID=local.dingping.fixedsplit
-source_app="$dmg_dir/定屏.app"
+source_app="$dmg_dir/安装资源/定屏.app"
 install_root="$HOME/Applications"
 target_app="$install_root/定屏.app"
 log_dir="$HOME/Library/Logs/定屏"
@@ -76,7 +76,7 @@ fi
 lock_owned=1
 printf '%s\n' "$$" > "$lock_dir/pid"
 
-if [[ ! -d "$source_app" || -L "$source_app" ]]; then echo 'DMG 中找不到定屏.app。'; exit 1; fi
+if [[ ! -d "$source_app" || -L "$source_app" ]]; then echo 'DMG 安装资源中找不到定屏.app。请重新下载完整映像。'; exit 1; fi
 if [[ "$(app_field "$source_app" CFBundleIdentifier)" != local.dingping.fixedsplit ]]; then echo 'DMG 应用标识不正确。'; exit 1; fi
 if [[ ! -x "$source_app/Contents/MacOS/DingPing" ]] || ! /usr/bin/codesign --verify --deep --strict "$source_app" >/dev/null 2>&1; then
   echo 'DMG 应用完整性检查失败。请重新下载原始文件。'

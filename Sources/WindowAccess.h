@@ -27,9 +27,10 @@ NSArray<FSWindow *> *FSAvailableWindows(void);
 NSArray<FSWindow *> *FSRestorableWindows(NSSet<NSString *> *bundleIDs);
 FSWindow *FSFocusedWindow(pid_t pid);
 FSWindow *FSWindowAtPoint(CGPoint point);
-/* Indicates a non-control title/toolbar surface; editable fields and buttons
-   must not be interpreted as pointer-only window dragging. */
-FSWindow *FSWindowAtPointWithChrome(CGPoint point, BOOL *plainChrome);
+/* Match the front WindowServer row under the pointer with its AX window.
+   Returns the visible frame for drag-origin geometry and a diagnostic reason. */
+FSWindow *FSWindowAtPointWithChrome(CGPoint point, FSRect *visibleFrame,
+                                    BOOL *plainChrome, NSString **reason);
 NSScreen *FSScreenForFrame(FSRect frame);
 NSString *FSDisplayID(NSScreen *screen);
 NSScreen *FSScreenWithID(NSString *identifier);

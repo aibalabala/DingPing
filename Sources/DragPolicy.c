@@ -36,6 +36,13 @@ bool FSPassiveDragCandidate(FSRect w,double x,double y) {
     return x>=w.x+8 && x<w.x+w.width-8 && y>=w.y+3 && y<w.y+band;
 }
 
+bool FSVisibleFrameMatch(FSRect axWindow,FSRect visibleWindow) {
+    double a=axWindow.width*axWindow.height,b=visibleWindow.width*visibleWindow.height;
+    if(!isfinite(a)||!isfinite(b)||a<=0||b<=0 ||
+       fmin(a,b)/fmax(a,b)<.55)return false;
+    return FSIntersectionArea(axWindow,visibleWindow)/fmin(a,b)>=.72;
+}
+
 bool FSWindowWasDragged(FSRect before, FSRect after) {
     if(!isfinite(before.x)||!isfinite(before.y)||!isfinite(after.x)||!isfinite(after.y)||
        !isfinite(before.width)||!isfinite(before.height)||!isfinite(after.width)||!isfinite(after.height))return false;
@@ -44,7 +51,13 @@ bool FSWindowWasDragged(FSRect before, FSRect after) {
 }
 
 bool FSWindowTitleMoved(FSRect before,FSRect after,double downX,double downY) {
-    return FSTitleCandidate(before,downX,downY) &&
+    return FSWindowTitleMovedFromVisible(before,after,before,downX,downY);
+}
+
+bool FSWindowTitleMovedFromVisible(FSRect before,FSRect after,FSRect visible,
+                                   double downX,double downY) {
+    return FSTitleCandidate(visible,downX,downY) &&
+           isfinite(before.x) && isfinite(before.y) &&
            isfinite(after.x) && isfinite(after.y) &&
            isfinite(after.width) && isfinite(after.height) &&
            after.width>0 && after.height>0 &&

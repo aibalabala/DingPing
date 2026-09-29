@@ -12,6 +12,8 @@ bool FSTitleCandidate(FSRect window, double x, double y);
 /* Passive drag detection may watch a larger toolbar area because it only acts
    after the actual window frame has moved. The active blocker stays strict. */
 bool FSPassiveDragCandidate(FSRect window, double x, double y);
+/* AX window frames and WindowServer bounds need not be pixel-identical. */
+bool FSVisibleFrameMatch(FSRect axWindow, FSRect visibleWindow);
 
 typedef enum { FSDropIgnore, FSDropBlocked, FSDropMove, FSDropSwap, FSDropReplace } FSDropAction;
 /* A genuine title-bar translation can change assignments; resizing cannot. */
@@ -19,6 +21,8 @@ bool FSWindowWasDragged(FSRect before, FSRect after);
 /* macOS may resize a window while moving it; this remains a drag when the
    gesture began in the interior of the title bar. */
 bool FSWindowTitleMoved(FSRect before,FSRect after,double downX,double downY);
+bool FSWindowTitleMovedFromVisible(FSRect before,FSRect after,FSRect visible,
+                                   double downX,double downY);
 /* A managed window can be assigned by a deliberate title-bar drop even if the
    target app restores its frame before accessibility reports the final move. */
 bool FSPointerDragIntent(FSRect sourceWindow,int source,bool plainChrome,

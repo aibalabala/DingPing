@@ -37,10 +37,16 @@ int main(void) {
     assert(FSPassiveDragCandidate(w,-1300,-1000));
     assert(!FSPassiveDragCandidate(w,-1300,-900)); /* Ordinary content is not a drag origin. */
     assert(!FSPassiveDragCandidate(w,-1435,-1050)); /* The window border cannot start it. */
+    assert(FSVisibleFrameMatch(w,(FSRect){-1438,-1077,1196,844}));
+    assert(FSVisibleFrameMatch(w,(FSRect){-1440,-1052,1200,820})); /* Different chrome height. */
+    assert(!FSVisibleFrameMatch(w,(FSRect){-720,-1080,1200,850})); /* Neighboring window. */
+    assert(!FSVisibleFrameMatch(w,(FSRect){-1440,-1080,3000,2000}));
+    assert(!FSVisibleFrameMatch(w,(FSRect){NAN,-1080,1200,850}));
     FSRect moved={-800,-400,1200,850},resized={-800,-400,800,850};
     assert(FSWindowWasDragged(w,moved));
     assert(!FSWindowWasDragged(w,resized));
     assert(FSWindowTitleMoved(w,resized,-1300,-1060));
+    assert(FSWindowTitleMovedFromVisible(w,resized,(FSRect){-1438,-1077,1196,844},-1300,-1060));
     assert(!FSWindowTitleMoved(w,resized,-1420,-1060)); /* Edge resize, not title drag. */
     assert(!FSWindowWasDragged(w,(FSRect){-1435,-1080,1200,850}));
     assert(!FSWindowWasDragged(w,(FSRect){NAN,0,1200,850}));
