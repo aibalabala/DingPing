@@ -1,16 +1,18 @@
-定屏 v0.5.0（构建 7）· 先看这里
+定屏 v0.5.1（构建 8）· 先看这里
 
-Apple Silicon Mac：建议从 GitHub Releases 下载 DingPing-v0.5.0-macOS-arm64.dmg。
-打开 DMG，先在菜单栏退出旧版定屏，再双击「双击安装预编译版.command」。
-它会验证签名、备份旧 App，并安装到 ~/Applications/定屏.app。
+Apple Silicon Mac：建议从 GitHub Releases 下载 DingPing-v0.5.1-macOS-arm64.dmg。
+打开 DMG，双击「双击安装预编译版.command」。
+安装器会请求旧版退出、验证签名，备份并替换个人 Applications 中的旧 App；
+若 /Applications/定屏.app 是经核对的定屏旧副本，会移到废纸篓。
+若无法退出或移除，按照终端提示处理后再试。安装到 ~/Applications/定屏.app；升级签名后会引导重新授权。
 此 DMG 使用临时签名、未做 Apple 公证；系统可能需要你手动确认打开。
 
 本源码文件夹还提供「双击安装.command」：需要 Apple Command Line Tools，
 在你自己的 Mac 上编译并安装同一版本。请完整解压后使用。
 
-安装后在定屏的「权限诊断」核对版本 0.5.0、构建 7 和应用完整路径。
+安装后在定屏的「权限诊断」核对版本 0.5.1、构建 8 和应用完整路径。
 若辅助功能开关显示开启、定屏却仍提示未授权，先退出定屏，
-再双击「双击修复升级.command」并按终端提示为当前这份 App 重新授权。
+优先双击 DMG 内「双击修复定屏授权.command」；源码安装可用「双击修复升级.command」。按终端提示为当前这份 App 重新授权。
 系统列表中的应用名称始终是「定屏」，不要仅凭名字判断新旧版本。
 若 Mac 用户名为 mac，准确路径是 /Users/mac/Applications/定屏.app。
 

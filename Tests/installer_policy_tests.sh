@@ -7,8 +7,8 @@ source "$test_root/Installer/common.sh"
 test_tmp="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/DingPing.installer-tests.XXXXXX")"
 trap '/bin/rm -rf "$test_tmp"' EXIT
 DP_BUNDLE_ID=local.dingping.fixedsplit
-DP_VERSION=0.5.0
-DP_BUILD=7
+DP_VERSION=0.5.1
+DP_BUILD=8
 DP_DIGEST=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 test_count=0
 
@@ -47,7 +47,7 @@ new_case() {
   DP_SWAP_PENDING=0; DP_PRESERVE_STAGE=0
 }
 make_app() {
-  local app="$1" version="${2:-0.5.0}" build="${3:-7}" identifier="${4:-local.dingping.fixedsplit}"
+  local app="$1" version="${2:-0.5.1}" build="${3:-8}" identifier="${4:-local.dingping.fixedsplit}"
   /bin/mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   printf 'CFBundleIdentifier=%s\nCFBundleShortVersionString=%s\nCFBundleVersion=%s\nCFBundleExecutable=DingPing\n' "$identifier" "$version" "$build" > "$app/Contents/Info.plist"
   printf '#!/bin/sh\nexit 0\n' > "$app/Contents/MacOS/DingPing"
@@ -84,7 +84,7 @@ expect_failure dp_launch_current "$target_app"
 expect_no_actions
 
 new_case
-make_app "$target_app" 0.5.0 6
+make_app "$target_app" 0.5.1 7
 dp_choose_install "$target_app"
 [[ "$DP_INSTALL_ACTION" == build ]] || fail 'build must match'
 expect_failure dp_reset_current_permission "$target_app"
@@ -107,7 +107,7 @@ expect_failure dp_reset_current_permission "$target_app"
 expect_no_actions
 
 new_case
-make_app "$target_app" 0.5.0 7 example.unrelated.application
+make_app "$target_app" 0.5.1 8 example.unrelated.application
 expect_failure dp_choose_install "$target_app"
 expect_failure dp_reset_current_permission "$target_app"
 expect_no_actions
@@ -129,9 +129,9 @@ expect_failure dp_launch_current "$target_app"
 expect_no_actions
 
 new_case
-make_app "$target_app" 0.5.1 1
+make_app "$target_app" 0.5.2 1
 expect_failure dp_choose_install "$target_app"
-make_app "$target_app" 0.5.0 8
+make_app "$target_app" 0.5.1 9
 expect_failure dp_choose_install "$target_app"
 make_app "$target_app" 0.10.0 1
 expect_failure dp_choose_install "$target_app"
@@ -218,6 +218,50 @@ test_start_during_archive=1
 expect_failure dp_replace_from_stage "$staged_app" "$target_app" "$archive"
 expect_version "$target_app" 0.3.1
 [[ -d "$staged_app" && "$DP_SWAP_PENDING" == 0 ]] || fail 'app launched during archive was overwritten'
+
+new_case
+make_app "$target_app"
+legacy_app="$case_dir/system Applications/定屏.app"
+make_app "$legacy_app" 0.3.1 5
+dp_trash_legacy_copy "$legacy_app" "$target_app" "$case_dir/.Trash"
+[[ "$DP_LEGACY_MOVED" == 1 && ! -e "$legacy_app" ]] || fail 'identified old copy not removed'
+trashed=("$case_dir"/.Trash/定屏旧版.*/定屏.app)
+[[ "${#trashed[@]}" == 1 && -d "${trashed[0]}" ]] || fail 'old copy missing from Trash'
+expect_version "$target_app" 0.5.1
+expect_version "${trashed[0]}" 0.3.1
+
+new_case
+make_app "$target_app"
+legacy_app="$case_dir/system Applications/定屏.app"
+make_app "$legacy_app" 0.3.1 5 unrelated.bundle
+expect_failure dp_trash_legacy_copy "$legacy_app" "$target_app" "$case_dir/.Trash"
+[[ "$DP_LEGACY_MOVED" == 0 ]] || fail 'unrelated app marked as removed'
+expect_version "$legacy_app" 0.3.1
+
+new_case
+make_app "$target_app"
+legacy_app="$case_dir/system Applications/定屏.app"
+make_app "$legacy_app" 0.5.2 1
+expect_failure dp_trash_legacy_copy "$legacy_app" "$target_app" "$case_dir/.Trash"
+[[ "$DP_LEGACY_MOVED" == 0 ]] || fail 'newer app marked as removed'
+expect_version "$legacy_app" 0.5.2
+
+new_case
+make_app "$target_app"
+legacy_app="$case_dir/system Applications/定屏.app"
+/bin/mkdir -p "${legacy_app%/*}"
+/bin/ln -s "$target_app" "$legacy_app"
+expect_failure dp_trash_legacy_copy "$legacy_app" "$target_app" "$case_dir/.Trash"
+[[ -L "$legacy_app" && "$DP_LEGACY_MOVED" == 0 ]] || fail 'symlink touched'
+
+new_case
+make_app "$target_app"
+legacy_app="$case_dir/system Applications/定屏.app"
+make_app "$legacy_app" 0.3.1 5
+test_fail_move_from="$legacy_app"
+expect_failure dp_trash_legacy_copy "$legacy_app" "$target_app" "$case_dir/.Trash"
+[[ "$DP_LEGACY_MOVED" == 0 ]] || fail 'failed move marked as removed'
+expect_version "$legacy_app" 0.3.1
 
 new_case
 make_app "$target_app" 0.3.1 5

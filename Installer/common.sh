@@ -27,6 +27,70 @@ dp_move() {
   /bin/mv "${1}" "${2}"
 }
 
+# Only an identified DingPing bundle at a known install location may be removed.
+# The current App is verified by the caller before reaching this step. The
+# user's layouts and other files in Application Support are never touched.
+dp_finder_trash_system_copy() {
+  /usr/bin/osascript -e 'tell application "Finder" to delete (POSIX file "/Applications/定屏.app" as alias)' >/dev/null 2>&1
+}
+
+dp_trash_legacy_copy() {
+  local legacy="${1}" current="${2}" trash_root="${3}" trash_dir version build
+  DP_LEGACY_MOVED=0
+  [[ "${legacy}" != "${current}" ]] || return 1
+  [[ ! -L "${legacy}" ]] || { echo '旧版位置是符号链接，未自动移除。'; return 1; }
+  [[ -e "${legacy}" ]] || return 0
+  if [[ "$(dp_plist "${legacy}" CFBundleIdentifier || true)" != "${DP_BUNDLE_ID}" ]]; then
+    echo '同名应用的标识不是定屏，未自动移除。'
+    return 1
+  fi
+  version="$(dp_plist "${legacy}" CFBundleShortVersionString || true)"
+  build="$(dp_plist "${legacy}" CFBundleVersion || true)"
+  if [[ ! "${version}" =~ ^[0-9]+(\.[0-9]+)*$ || ! "${build}" =~ ^[0-9]+(\.[0-9]+)*$ ||
+        "$(dp_plist "${legacy}" CFBundleExecutable || true)" != DingPing ||
+        ! -x "${legacy}/Contents/MacOS/DingPing" ]]; then
+    echo '旧副本的版本或主程序无法确认，未自动移除。'
+    return 1
+  fi
+  if dp_installed_is_newer "${legacy}"; then
+    echo '系统 Applications 中的副本比本安装包更新，未移除或降级。'
+    return 1
+  fi
+  if ! /bin/mkdir -p "${trash_root}" ||
+     ! trash_dir="$(/usr/bin/mktemp -d "${trash_root}/定屏旧版.XXXXXX")"; then
+    echo '无法准备废纸篓，未移除旧版。'
+    return 1
+  fi
+  if dp_move "${legacy}" "${trash_dir}/定屏.app"; then
+    DP_LEGACY_MOVED=1
+    printf '旧版已移到废纸篓：%s\n' "${trash_dir}/定屏.app"
+    return 0
+  fi
+  /bin/rmdir "${trash_dir}" 2>/dev/null || true
+  # A system Applications copy may need Finder's normal authorization prompt.
+  if [[ "${legacy}" == /Applications/定屏.app ]] &&
+     dp_finder_trash_system_copy && [[ ! -e "${legacy}" && ! -L "${legacy}" ]]; then
+    DP_LEGACY_MOVED=1
+    echo '系统 Applications 中的旧版已由 Finder 移到废纸篓。'
+    return 0
+  fi
+  printf '无法移除旧版：%s。请在 Finder 中移到废纸篓后重新安装。\n' "${legacy}"
+  return 1
+}
+
+dp_request_quit() {
+  local pids attempt
+  pids="$(dp_running_pids || true)"
+  [[ -n "${pids}" ]] || return 0
+  echo '正在请求运行中的定屏退出，以便卸载旧版…'
+  /usr/bin/osascript -e 'tell application id "local.dingping.fixedsplit" to quit' >/dev/null 2>&1 || true
+  for ((attempt=0;attempt<20;attempt++)); do
+    [[ -z "$(dp_running_pids || true)" ]] && return 0
+    /bin/sleep .25
+  done
+  dp_require_stopped
+}
+
 dp_archive_app() {
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent "${1}" "${2}" &&
     /usr/bin/unzip -tq "${2}" >/dev/null

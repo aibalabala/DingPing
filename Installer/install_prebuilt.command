@@ -7,6 +7,9 @@ if [[ "$(/usr/bin/uname -s)" != Darwin ]]; then echo '请在 Mac 上运行。'; 
 if [[ "$(/usr/bin/uname -m)" != arm64 ]]; then echo '此 DMG 适用于 Apple Silicon Mac。'; exit 1; fi
 
 dmg_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "$dmg_dir/.dingping-install.sh" ]]; then echo 'DMG 缺少安装组件，请重新下载完整映像。'; exit 1; fi
+source "$dmg_dir/.dingping-install.sh"
+DP_BUNDLE_ID=local.dingping.fixedsplit
 source_app="$dmg_dir/定屏.app"
 install_root="$HOME/Applications"
 target_app="$install_root/定屏.app"
@@ -72,7 +75,6 @@ if ! /bin/mkdir "$lock_dir" 2>/dev/null; then
 fi
 lock_owned=1
 printf '%s\n' "$$" > "$lock_dir/pid"
-require_stopped
 
 if [[ ! -d "$source_app" || -L "$source_app" ]]; then echo 'DMG 中找不到定屏.app。'; exit 1; fi
 if [[ "$(app_field "$source_app" CFBundleIdentifier)" != local.dingping.fixedsplit ]]; then echo 'DMG 应用标识不正确。'; exit 1; fi
@@ -85,49 +87,91 @@ build="$(app_field "$source_app" CFBundleVersion)"
 source_hash="$(cdhash "$source_app")"
 if [[ -z "$version" || -z "$build" || -z "$source_hash" ]]; then echo 'DMG 应用版本或签名无法读取。'; exit 1; fi
 printf 'DMG 应用版本：%s（构建 %s）\n' "$version" "$build"
+DP_VERSION="$version"
+DP_BUILD="$build"
+dp_request_quit
+require_stopped
 
+previous_hash=''
+other_same_id=0
+if [[ -L /Applications/定屏.app ]]; then
+  echo '系统 Applications 中的同名项目是符号链接，已停止以免误删。请先在 Finder 中核对并移除后重试。'
+  exit 1
+fi
+if [[ -d /Applications/定屏.app && ! -L /Applications/定屏.app &&
+      "$(app_field /Applications/定屏.app CFBundleIdentifier || true)" == local.dingping.fixedsplit ]]; then
+  other_same_id=1
+  printf '另外发现同标识的应用：/Applications/定屏.app（版本 %s）。\n' \
+    "$(app_field /Applications/定屏.app CFBundleShortVersionString || true)"
+  echo '新版安装成功后会把这个旧副本移到废纸篓。'
+fi
 if [[ -L "$target_app" ]]; then echo '安装位置是符号链接，已停止。'; exit 1; fi
 if [[ -e "$target_app" ]]; then
   if [[ "$(app_field "$target_app" CFBundleIdentifier || true)" != local.dingping.fixedsplit ]]; then
     echo '个人 Applications 中已有其他同名项目，已停止以免覆盖。'
     exit 1
   fi
+  if dp_installed_is_newer "$target_app"; then
+    echo '已安装更高版本；这个旧 DMG 不会降级覆盖它。'
+    exit 1
+  fi
+  previous_hash="$(cdhash "$target_app" || true)"
   if /usr/bin/codesign --verify --deep --strict "$target_app" >/dev/null 2>&1 &&
      [[ "$(app_field "$target_app" CFBundleShortVersionString || true)" == "$version" &&
         "$(app_field "$target_app" CFBundleVersion || true)" == "$build" &&
         "$(cdhash "$target_app")" == "$source_hash" ]]; then
-    echo '相同构建和签名已经安装，直接打开，不重复替换。'
-    /usr/bin/open -R "$target_app" >/dev/null 2>&1 || true
-    /usr/bin/open -n -a "$target_app"
-    exit 0
+    installed_same=1
   fi
 fi
 
-/bin/mkdir -p "$install_root"
-stage_dir="$(/usr/bin/mktemp -d "$install_root/.DingPing.dmg.XXXXXX")"
-/usr/bin/ditto "$source_app" "$stage_dir/new.app"
-/usr/bin/codesign --verify --deep --strict "$stage_dir/new.app"
-if [[ "$(cdhash "$stage_dir/new.app")" != "$source_hash" ]]; then echo '复制后的签名不匹配，已停止。'; exit 1; fi
+if [[ "${installed_same:-0}" == 1 ]]; then
+  echo '相同构建和签名已经安装，保留现有 App。'
+else
+  /bin/mkdir -p "$install_root"
+  stage_dir="$(/usr/bin/mktemp -d "$install_root/.DingPing.dmg.XXXXXX")"
+  /usr/bin/ditto "$source_app" "$stage_dir/new.app"
+  /usr/bin/codesign --verify --deep --strict "$stage_dir/new.app"
+  if [[ "$(cdhash "$stage_dir/new.app")" != "$source_hash" ]]; then echo '复制后的签名不匹配，已停止。'; exit 1; fi
 
-if [[ -e "$target_app" ]]; then
-  backup_root="$HOME/Library/Application Support/定屏/Backups"
-  /bin/mkdir -p "$backup_root"
-  backup_dir="$(/usr/bin/mktemp -d "$backup_root/dmg.XXXXXX")"
-  backup_zip="$backup_dir/previous.zip"
-  /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$target_app" "$backup_zip"
-  /usr/bin/unzip -tq "$backup_zip" >/dev/null
-  printf '旧应用压缩备份：%s\n' "$backup_zip"
+  if [[ -e "$target_app" ]]; then
+    backup_root="$HOME/Library/Application Support/定屏/Backups"
+    /bin/mkdir -p "$backup_root"
+    backup_dir="$(/usr/bin/mktemp -d "$backup_root/dmg.XXXXXX")"
+    backup_zip="$backup_dir/previous.zip"
+    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$target_app" "$backup_zip"
+    /usr/bin/unzip -tq "$backup_zip" >/dev/null
+    printf '旧应用压缩备份：%s\n' "$backup_zip"
+  fi
+  require_stopped
+
+  swap_pending=1
+  if [[ -e "$target_app" ]]; then had_previous=1; /bin/mv "$target_app" "$stage_dir/previous.app"; fi
+  /bin/mv "$stage_dir/new.app" "$target_app"
+  /usr/bin/codesign --verify --deep --strict "$target_app"
+  if [[ "$(cdhash "$target_app")" != "$source_hash" ]]; then echo '替换后签名不匹配。'; exit 1; fi
+  swap_pending=0
 fi
-require_stopped
-
-swap_pending=1
-if [[ -e "$target_app" ]]; then had_previous=1; /bin/mv "$target_app" "$stage_dir/previous.app"; fi
-/bin/mv "$stage_dir/new.app" "$target_app"
-/usr/bin/codesign --verify --deep --strict "$target_app"
-if [[ "$(cdhash "$target_app")" != "$source_hash" ]]; then echo '替换后签名不匹配。'; exit 1; fi
-swap_pending=0
 printf '\n安装完成：%s\n' "$target_app"
+if [[ "$other_same_id" == 1 ]]; then
+  dp_trash_legacy_copy /Applications/定屏.app "$target_app" "$HOME/.Trash" || exit 1
+fi
 echo '首次分屏请在「系统设置 → 隐私与安全性 → 辅助功能」添加上面的准确路径并打开开关。'
-echo '开关已开启但仍未授权时，先退出定屏，再运行源码包中的「双击修复升级.command」。'
 /usr/bin/open -R "$target_app" >/dev/null 2>&1 || true
-/usr/bin/open -n -a "$target_app"
+needs_repair=0
+if [[ -n "$previous_hash" && "$previous_hash" != "$source_hash" ]]; then needs_repair=1; fi
+if [[ "$other_same_id" == 1 ]]; then needs_repair=1; fi
+if [[ "$needs_repair" == 1 ]]; then
+  echo '检测到旧签名或同标识副本。旧版的辅助功能开关不能代表新版已获授权。'
+  if [[ -t 0 && -f "$dmg_dir/双击修复定屏授权.command" ]]; then
+    if /bin/bash "$dmg_dir/双击修复定屏授权.command" --from-installer; then
+      echo '授权引导已完成；请以新应用内的「权限诊断」为准。'
+    else
+      echo '应用已经安装，授权引导尚未完成。稍后可双击 DMG 里的「双击修复定屏授权.command」。'
+    fi
+  else
+    echo '请双击 DMG 中的「双击修复定屏授权.command」重新添加当前 App。'
+  fi
+else
+  /usr/bin/open -n -a "$target_app"
+  echo '如果系统显示旧开关已开但仍未授权，请用 DMG 里的「双击修复定屏授权.command」。'
+fi

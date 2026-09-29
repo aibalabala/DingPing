@@ -57,6 +57,7 @@ mac_major="$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)"
 if [[ "$mac_major" -lt 13 ]]; then echo '此版本要求 macOS 13 或更新版本。'; exit 1; fi
 
 # Even the unchanged-version path must first reject an old running copy.
+dp_request_quit || exit 1
 dp_choose_install "$target_app" || exit 1
 if [[ "$DP_INSTALL_ACTION" == keep ]]; then
   echo '已确认版本、构建号、内容指纹和签名一致：保留现有 App，不重复编译或签名。'
@@ -84,6 +85,10 @@ else
   fi
   dp_replace_from_stage "$stage_dir/定屏.app" "$target_app" "$archive" || exit 1
   if [[ -n "$archive" ]]; then printf '旧版已压缩备份：%s\n' "$archive"; fi
+fi
+
+if [[ -e /Applications/定屏.app || -L /Applications/定屏.app ]]; then
+  dp_trash_legacy_copy /Applications/定屏.app "$target_app" "$HOME/.Trash" || exit 1
 fi
 
 echo ''

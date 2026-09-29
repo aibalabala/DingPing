@@ -2,7 +2,7 @@
 
 macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后激活的普通窗口会自动进入当前布局。选择「自由模式」即可停止自动归位与固定。它使用 macOS 辅助功能调整窗口，不调用系统的全屏 Split View。
 
-当前版本：**v0.5.0（构建 7）**。
+当前版本：**v0.5.1（构建 8）**。
 
 ## 主要功能
 
@@ -16,7 +16,7 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 ## 安装
 
-要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) 下载 `DingPing-v0.5.0-macOS-arm64.dmg`。打开 DMG 后双击其中的 `双击安装预编译版.command`，它会核对版本和签名、备份旧应用，安装到：
+要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) 下载 `DingPing-v0.5.1-macOS-arm64.dmg`。打开 DMG 后双击其中的 `双击安装预编译版.command`，它会请求旧版退出，核对版本和签名、备份并替换旧应用；若 `/Applications/定屏.app` 中另有经验证的定屏副本，会移到废纸篓。更换签名时会接着引导修复授权，安装到：
 
 ```text
 ~/Applications/定屏.app
@@ -26,7 +26,7 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 需要在自己的 Mac 上从源码编译时，先安装 Apple Command Line Tools，下载仓库 ZIP 并**完整解压**，退出所有正在运行的定屏，然后双击 `双击安装.command`。脚本会在当前 Mac 上编译、校验和本地签名，也安装到上述路径。
 
-如果更新后只看到旧版、或者权限开关开启但 App 显示未授权：先从菜单栏「退出定屏」，双击 `双击修复升级.command`。工具会先验证或完成安装，然后引导你重新添加当前 App。列表中的名称仍是「定屏」，请用脚本打印的**完整路径**确认版本；可用 `检查已安装版本.command` 只读检查。
+若已安装后仍显示「等待授权」，双击 DMG 内的 `双击修复定屏授权.command`，或点应用界面的「修复旧版授权」。它会核对 v0.5.1、退出定屏，仅尝试清理定屏自己的旧记录，然后引导你移除辅助功能列表中的旧条目，从 `~/Applications` 选中当前 `定屏.app` 并开启开关。源码包仍提供 `双击修复升级.command`；可用 `检查已安装版本.command` 只读检查。
 
 安装失败可运行 `检查安装环境.command`。不会覆盖标识不同的同名项目，也不会用旧包覆盖已安装的更高版本。更多操作见[安装修复说明](本次安装修复.txt)与[权限说明](权限修复说明.txt)。
 
@@ -34,8 +34,8 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 原生 Objective-C / AppKit，核心分区与拖动规则为 C；不依赖第三方运行库。主要文件在 `Sources/`，本机编译脚本在 `Scripts/build.sh`，测试在 `Tests/`。
 
-已在 Linux 上通过 113,277 条分区计算断言、固定位置与自动归位规则测试、22 项安装策略与回滚模拟场景、Shell 提示检查。GitHub Actions 使用 macOS ARM64 runner 原生编译、运行核心测试并校验 DMG；工作流结果可在 [Actions](https://github.com/aibalabala/DingPing/actions) 查看。**实际窗口、焦点和辅助功能授权仍需在用户 Mac 上验证。**Mac 验收清单见 [Tests/MAC_ACCEPTANCE.md](Tests/MAC_ACCEPTANCE.md)。
+已在 Linux 上通过 113,277 条分区计算断言、固定位置与自动归位规则测试、27 项安装策略与回滚模拟场景、Shell 提示检查。GitHub Actions 使用 macOS ARM64 runner 原生编译、运行核心测试并校验 DMG；工作流结果可在 [Actions](https://github.com/aibalabala/DingPing/actions) 查看。**实际窗口、焦点和辅助功能授权仍需在用户 Mac 上验证。**Mac 验收清单见 [Tests/MAC_ACCEPTANCE.md](Tests/MAC_ACCEPTANCE.md)。
 
-目前采用 Mac 本地临时签名；更换应用构建后可能需要重新授予辅助功能权限。工具不会自动代替用户授予系统权限。
+当前 GitHub DMG 使用临时签名。更换应用构建会改变签名身份，因此升级时仍需重新授予辅助功能权限；修复工具只简化重新授权流程，不能代替系统开关。长期免重复授权需要由同一稳定签名身份发布后续版本。
 
 本仓库当前没有附带开源许可证。公开可查看源码不等于已授权再分发或修改发布；许可证可由作者后续单独确定。

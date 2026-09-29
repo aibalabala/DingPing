@@ -43,16 +43,16 @@ fi
 
 echo ''
 echo '[1/3] 已确认当前版本和安装位置，正在重置定屏自己的授权记录……'
-if ! dp_reset_current_permission "$app"; then
-  echo '未能完成授权重置，具体原因见上方。没有执行全局权限重置。'
-  exit 5
+dp_require_current "$app" || exit 5
+if ! dp_tcc_reset "$bundle_id"; then
+  echo '系统未接受按应用标识重置。请在下一步手动移除旧定屏条目；没有执行全局重置。'
 fi
 
 echo '[2/3] 请在系统设置中为下面这份应用重新授权：'
 printf '%s\n\n' "$app"
 echo '  1. 进入「隐私与安全性 → 辅助功能」。如果仍有旧定屏条目，只移除定屏。'
 echo '  2. 点「+」，在选择窗口按 Command + Shift + G。'
-printf '  3. 粘贴上面的完整路径 %s，回车，再点「打开」。\n' "$app"
+printf '  3. 粘贴文件夹 %s，回车；选中「定屏.app」再点「打开」。\n' "$HOME/Applications"
 echo '  4. 开启「定屏」旁的开关。列表名称仍然是定屏，不需要找第二个新版条目。'
 echo '如果列表没有刷新，先切换到其他设置页面，再回到辅助功能。'
 echo ''

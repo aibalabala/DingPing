@@ -7,7 +7,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.0";
+static NSString *const FSVersion=@"0.5.1";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -212,6 +212,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) NSTextField *guideDetail;
 @property(nonatomic,strong) NSTextField *stateLabel;
 @property(nonatomic,strong) NSButton *guideButton;
+@property(nonatomic,strong) NSButton *repairButton;
 @property(nonatomic,strong) NSButton *fillButton;
 @property(nonatomic,strong) NSButton *rotateButton;
 @property(nonatomic,strong) NSButton *moreButton;
@@ -755,6 +756,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [extra addItem:[self item:@"恢复分屏前的位置（本次运行）" action:@selector(restoreOriginals:) value:nil]];
     [extra addItem:NSMenuItem.separatorItem];
     [extra addItem:[self item:@"打开权限设置…" action:@selector(openPermission:) value:nil]];
+    if(!AXIsProcessTrusted())
+        [extra addItem:[self item:@"修复旧版授权…" action:@selector(repairOldPermission:) value:nil]];
     [extra addItem:[self item:@"权限诊断…" action:@selector(showPermissionDiagnostics:) value:nil]];
     [extra addItem:[self item:@"在 Finder 中显示当前应用" action:@selector(revealCurrentApp:) value:nil]];
     [extra addItem:[self item:@"打开配置文件夹" action:@selector(openConfigFolder:) value:nil]];
@@ -791,9 +794,12 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 
     FSCard *guide=[[FSCard alloc] initWithFrame:NSMakeRect(24,76,932,62)];[v addSubview:guide];
     self.guideTitle=label(@"",NSMakeRect(14,7,736,20),14,YES);[guide addSubview:self.guideTitle];
-    self.guideDetail=label(@"",NSMakeRect(14,30,740,26),11,NO);
+    self.guideDetail=label(@"",NSMakeRect(14,30,570,26),11,NO);
     self.guideDetail.maximumNumberOfLines=2;self.guideDetail.lineBreakMode=NSLineBreakByWordWrapping;
     [self.guideDetail.cell setUsesSingleLineMode:NO];[guide addSubview:self.guideDetail];
+    self.repairButton=button(@"修复旧版授权",NSMakeRect(594,14,164,32),self,@selector(repairOldPermission:));
+    self.repairButton.toolTip=@"退出定屏后，在终端引导你移除旧记录并重新授权准确路径。";
+    [guide addSubview:self.repairButton];
     self.guideButton=button(@"",NSMakeRect(762,14,158,32),self,NULL);[guide addSubview:self.guideButton];
 
     [v addSubview:label(@"选择布局",NSMakeRect(26,144,155,20),14,YES)];
@@ -979,6 +985,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.statusItem.button.toolTip=[NSString stringWithFormat:@"定屏 · %@ · %@",state,self.profile[@"name"]];
     self.statusLabel.stringValue=self.statusText?:@"点击布局立即生效。";
     self.guideButton.enabled=YES;
+    self.repairButton.hidden=trusted || self.choosingWindow;
+    self.repairButton.enabled=!self.choosingWindow;
     if(self.choosingWindow) {
         NSInteger seconds=MAX(0,(NSInteger)ceil(self.pickingDeadline-NSDate.timeIntervalSinceReferenceDate));
         self.guideTitle.stringValue=[NSString stringWithFormat:@"点击区域 %ld 要使用的窗口（%ld 秒）",(long)self.pickingSlot+1,(long)seconds];
@@ -986,7 +994,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         self.guideButton.title=@"取消选择";self.guideButton.action=@selector(cancelPicking:);
     } else if(!trusted) {
         self.guideTitle.stringValue=self.locked?@"自动分屏需要辅助功能权限":@"当前为自由模式 · 分屏前需授权";
-        self.guideDetail.stringValue=@"点右侧按钮手动授权。系统开关已开仍无效时，可查看「权限诊断」。";
+        self.guideDetail.stringValue=@"系统开关已开仍无效时，点「修复旧版授权」移除旧条目，再添加当前 App。";
         self.guideButton.title=@"打开权限设置";self.guideButton.action=@selector(openPermission:);
     } else if(!self.locked) {
         self.guideTitle.stringValue=@"自由模式 · 窗口由你自己摆放";
@@ -1514,7 +1522,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (BOOL)requirePermission {
     if(AXIsProcessTrusted())return YES;
     /* Denied operations must never launch Settings, activate our window or prompt. */
-    [self setMessage:@"当前程序未获辅助功能授权，操作已暂停。请手动点击「打开权限设置」；如果系统开关已开，先查看「权限诊断」中的应用路径。"];
+    [self setMessage:@"当前程序未获辅助功能授权。旧版开关已开仍无效时，点「修复旧版授权」；首次授权可点「打开权限设置」。"];
     [self updateStatus];
     return NO;
 }
@@ -1524,6 +1532,23 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     /* Only an explicit menu/button action reaches this method. Open one surface. */
     BOOL opened=[NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
     [self setMessage:opened?@"请为当前这份定屏开启辅助功能。列表中没有时，用 + 添加「权限诊断」显示的应用路径；完成后返回并点击「更新窗口列表」。":@"未能打开设置。请手动前往「系统设置 → 隐私与安全性 → 辅助功能」。"];
+}
+- (void)repairOldPermission:(id)sender {
+    if(AXIsProcessTrusted()) {
+        [self setMessage:@"当前进程已经获得辅助功能授权，无需移除现有授权。"];
+        return;
+    }
+    [self cancelActivation];[self finishPicking];
+    NSURL *tool=[NSBundle.mainBundle URLForResource:@"修复定屏授权" withExtension:@"command"];
+    if(!tool) {
+        [self setMessage:@"应用中缺少授权修复工具。请从最新 DMG 双击「双击修复定屏授权.command」。"];
+        return;
+    }
+    if([NSWorkspace.sharedWorkspace openURL:tool]) {
+        [NSApp terminate:nil];
+    } else {
+        [self setMessage:@"未能打开终端修复工具。请从 DMG 双击「双击修复定屏授权.command」。"];
+    }
 }
 - (void)revealCurrentApp:(id)sender {
     [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[NSBundle.mainBundle.bundleURL]];
@@ -1538,7 +1563,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
         trusted?@"已授权":@"未授权",bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
         trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
-        @"若系统开关已经开启，可能对应旧版本或其他副本。先在 Finder 中确认上面的应用位置，然后退出定屏，仅移除辅助功能列表中的定屏条目，用 + 重新添加这份应用并开启，再重新启动。"];
+        @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从个人 Applications 重新添加这份应用并开启。"];
     NSAlert *alert=[NSAlert new];alert.messageText=@"定屏 · 权限诊断";alert.informativeText=diagnostic;
     [alert addButtonWithTitle:@"关闭"];[alert addButtonWithTitle:@"在 Finder 中显示"];[alert addButtonWithTitle:@"复制诊断"];
     [NSApp activateIgnoringOtherApps:YES];
