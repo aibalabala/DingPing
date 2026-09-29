@@ -67,14 +67,27 @@ jobs:
           cp Installer/pkg_preinstall "$scripts/preinstall"
           cp Installer/pkg_postinstall "$scripts/postinstall"
           chmod 755 "$scripts/preinstall" "$scripts/postinstall"
+          component="$RUNNER_TEMP/DingPing-component.plist"
+          pkgbuild --analyze --root "$payload" "$component"
+          /usr/bin/python3 - "$component" <<'PY'
+          import plistlib, sys
+          path = sys.argv[1]
+          with open(path, 'rb') as source:
+              bundles = plistlib.load(source)
+          assert len(bundles) == 1
+          bundles[0]['BundleIsRelocatable'] = False
+          with open(path, 'wb') as target:
+              plistlib.dump(bundles, target)
+          PY
           pkg="$GITHUB_WORKSPACE/dist/DingPing-v0.5.7-macOS-arm64.pkg"
           pkgbuild --root "$payload" --install-location / --ownership recommended \
+            --component-plist "$component" \
             --identifier local.dingping.fixedsplit.installer --version 0.5.7 \
             --scripts "$scripts" "$pkg"
           pkgutil --payload-files "$pkg" | grep -F 'Applications/定屏.app/Contents/MacOS/DingPing'
           expanded="$RUNNER_TEMP/DingPing-pkg-expanded"
           pkgutil --expand "$pkg" "$expanded"
-          test -f "$expanded/Scripts"
+          test -e "$expanded/Scripts"
           shasum -a 256 "$pkg" > "$pkg.sha256"
 
       - name: Create and verify DMG
