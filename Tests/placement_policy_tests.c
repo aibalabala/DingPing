@@ -17,6 +17,10 @@ int main(void) {
     assert(FSPlacementChooseAvailableSlot(&state,2,-1,3,3)==-1); /* No replaceable slot. */
     assert(FSPlacementChooseAvailableSlot(&state,4,-1,15,11u)==2);
     assert(FSPlacementChooseAvailableSlot(&state,4,2,15,11u)==2);
+    assert(FSPlacementChooseNewWindowSlot(&state,3,1,3u,0,true)==1); /* New window replaces active despite an empty third slot. */
+    assert(FSPlacementChooseNewWindowSlot(&state,3,1,3u,0,false)==2); /* Existing windows still fill empty slots. */
+    assert(FSPlacementChooseNewWindowSlot(&state,3,0,1u,1u,true)==1); /* Active pin is reserved. */
+    assert(FSPlacementChooseNewWindowSlot(&state,3,-1,1u,0,true)==1); /* No active zone: ordinary placement. */
     state.lastSlot=0;
     assert(FSPlacementChooseAvailableSlot(&state,3,-1,7,1)==1);
     state.lastSlot=3;
@@ -25,6 +29,7 @@ int main(void) {
     assert(FSPlacementChooseSlot(&state,5,-1,0)==-1);
     uint64_t first=FSPlacementBeginSwitch(&state);
     assert(FSPlacementChooseSlot(&state,2,-1,0)==-1); /* Internal focus is suppressed. */
+    assert(FSPlacementChooseNewWindowSlot(&state,2,1,0,0,true)==-1);
     uint64_t last=FSPlacementBeginSwitch(&state);
     assert(!FSPlacementFinishSwitch(&state,first)); /* Last click wins. */
     assert(FSPlacementSwitchIsCurrent(&state,last));
@@ -34,6 +39,7 @@ int main(void) {
     FSPlacementSetEnabled(&state,false);
     assert(!FSPlacementFinishSwitch(&state,first)); /* Free mode cancels queued work. */
     assert(FSPlacementChooseSlot(&state,2,1,3)==-1);
+    assert(FSPlacementChooseNewWindowSlot(&state,2,1,3,0,true)==-1);
     first=FSPlacementBeginSwitch(&state);
     FSPlacementCancelSwitch(&state); /* New user input cancels foreground handoff. */
     assert(!FSPlacementSwitchIsCurrent(&state,first));
@@ -58,6 +64,6 @@ int main(void) {
                 if(known>=0 && known<count && !(pins&(1u<<known)))assert(chosen==known);
             }
         }
-    puts("PASS: free mode, pin reservations, empty-first placement, returning windows, layout shrink, switch cancellation and last-click wins.");
+    puts("PASS: free mode, pin reservations, new-window active slot, empty-first existing windows, layout shrink, switch cancellation.");
     return 0;
 }

@@ -35,3 +35,9 @@ int FSPlacementChooseAvailableSlot(const FSPlacementState *state, int count, int
     for(int slot=0;slot<count;++slot)if(!(reserved & (1u<<slot)))return slot;
     return -1;
 }
+int FSPlacementChooseNewWindowSlot(const FSPlacementState *state,int count,int activeSlot,
+                                   unsigned occupied,unsigned reserved,bool preferActive) {
+    if(preferActive && state && state->enabled && !state->switching && count>=1 && count<=4 &&
+       activeSlot>=0 && activeSlot<count && !(reserved & (1u<<activeSlot)))return activeSlot;
+    return FSPlacementChooseAvailableSlot(state,count,-1,occupied,reserved);
+}

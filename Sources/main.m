@@ -3,11 +3,12 @@
 #import "WindowAccess.h"
 #import "DragGuard.h"
 #import "FocusObserver.h"
+#include "DragPolicy.h"
 #include "PlacementPolicy.h"
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.1";
+static NSString *const FSVersion=@"0.5.2";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -146,6 +147,16 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @end
 @implementation FSAssignment @end
 
+@interface FSNewWindow : NSObject
+@property(nonatomic,strong) id element;
+@property(nonatomic) pid_t pid;
+@property(nonatomic) NSInteger activeSlot;
+@property(nonatomic) NSTimeInterval createdAt;
+@property(nonatomic,copy) NSString *profileID;
+@property(nonatomic,strong) FSWindow *parent;
+@end
+@implementation FSNewWindow @end
+
 @interface FSApp : NSObject<NSApplicationDelegate,NSMenuDelegate,NSWindowDelegate> {
     EventHotKeyRef _hotKeys[15];
     EventHandlerRef _hotHandler;
@@ -169,8 +180,13 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) id inputMonitor;
 @property(nonatomic,strong) id localInputMonitor;
 @property(nonatomic,strong) FSWindow *observedWindow;
+@property(nonatomic,strong) FSWindow *draggedWindow;
+@property(nonatomic) FSRect dragStartFrame;
+@property(nonatomic) BOOL dragMotionSeen;
+@property(nonatomic,copy) NSString *dragProfileID;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableArray<FSAssignment *> *> *histories;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSDictionary<NSNumber *,FSWindow *> *> *runtimeCache;
+@property(nonatomic,strong) NSMutableArray<FSNewWindow *> *newWindows;
 @property(nonatomic) NSUInteger focusGeneration;
 @property(nonatomic) NSTimeInterval lastMaintenance;
 @property(nonatomic,strong) NSButton *freeButton;
@@ -217,6 +233,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) NSButton *rotateButton;
 @property(nonatomic,strong) NSButton *moreButton;
 @property(nonatomic,strong) NSButton *launchCheckbox;
+@property(nonatomic,strong) NSButton *newWindowCheckbox;
 @property(nonatomic,strong) FSFlippedView *documentView;
 @property(nonatomic,strong) NSView *advancedView;
 @property(nonatomic) BOOL moreExpanded;
@@ -248,6 +265,11 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)cancelActivation;
 - (void)rememberAssignment:(FSWindow *)window slot:(NSInteger)slot;
 - (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot;
+- (void)beginWindowDrag:(NSEvent *)event;
+- (void)finishWindowDrag:(NSEvent *)event;
+- (void)clearWindowDrag;
+- (void)noteCreatedWindow:(id)element pid:(pid_t)pid;
+- (NSInteger)createdWindowActiveSlot:(FSWindow *)window;
 - (BOOL)slotPinned:(NSInteger)slot;
 - (void)togglePin:(NSButton *)sender;
 - (void)pinFocusedSlot:(NSMenuItem *)sender;
@@ -271,7 +293,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (NSMutableDictionary *)newProfile:(NSString *)name {
     NSString *display=NSScreen.screens.count?FSDisplayID(NSScreen.mainScreen?:NSScreen.screens.firstObject):@"";
     return [@{@"id":NSUUID.UUID.UUIDString,@"name":name,@"display":display,@"layout":@0,
-              @"ratio":@.5,@"gap":@8,@"preventDrag":@NO,@"bindings":[NSMutableArray arrayWithObjects:@{},@{},@{},@{},nil]} mutableCopy];
+              @"ratio":@.5,@"gap":@8,@"preventDrag":@NO,@"newWindowInActiveSlot":@YES,
+              @"bindings":[NSMutableArray arrayWithObjects:@{},@{},@{},@{},nil]} mutableCopy];
 }
 - (NSMutableDictionary *)profile {
     for(NSMutableDictionary *p in self.config[@"profiles"])if([p[@"id"] isEqual:self.config[@"active"]])return p;
@@ -297,6 +320,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         if(layout<0 || layout>=FSLayoutCount) {valid=NO;break;}
         NSMutableDictionary *p=[candidate mutableCopy];
         p[@"preventDrag"]=@([p[@"preventDrag"] isEqual:@YES]);
+        p[@"newWindowInActiveSlot"]=[candidate[@"newWindowInActiveSlot"] isKindOfClass:NSNumber.class]?
+            @([candidate[@"newWindowInActiveSlot"] boolValue]):@YES;
         p[@"ratio"]=@(fmin(.8,fmax(.2,[p[@"ratio"] doubleValue])));
         p[@"gap"]=@(fmin(40,fmax(0,[p[@"gap"] doubleValue])));
         NSMutableArray *bindings=[NSMutableArray new];
@@ -346,6 +371,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 }
 - (void)resetTracking:(BOOL)clearWindows {
     [self finishPicking];
+    [self clearWindowDrag];
+    [self.newWindows removeAllObjects];
     self.epoch++; [self.failures removeAllObjects]; [self.targets removeAllObjects];
     [self.suspended removeAllIndexes]; [self.pending removeAllIndexes];
     if(clearWindows)[self.runtime removeAllObjects];
@@ -357,6 +384,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.targets=[NSMutableDictionary new]; self.suspended=[NSMutableIndexSet new];
     self.pending=[NSMutableIndexSet new]; self.originals=[NSMutableArray new];
     self.histories=[NSMutableDictionary new];self.runtimeCache=[NSMutableDictionary new];
+    self.newWindows=[NSMutableArray new];
     self.focusObserver=[FSFocusObserver new];
     self.dragGuard=[FSDragGuard new];
     __weak FSApp *weakSelf=self;
@@ -368,8 +396,15 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     };
     self.dragGuard.onFailure=^(NSString *message){[weakSelf setMessage:message];[weakSelf updateStatus];};
     self.focusObserver.onChange=^{[weakSelf scheduleAutomaticPlacement];};
-    self.inputMonitor=[NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown|NSEventMaskRightMouseDown|NSEventMaskKeyDown handler:^(NSEvent *event){
+    self.focusObserver.onCreated=^(id element,pid_t pid){[weakSelf noteCreatedWindow:element pid:pid];};
+    self.inputMonitor=[NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown|NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp|NSEventMaskRightMouseDown|NSEventMaskKeyDown handler:^(NSEvent *event){
         FSApp *app=weakSelf;
+        if(!app)return;
+        if(event.type==NSEventTypeLeftMouseDragged) {
+            if(app.draggedWindow)app.dragMotionSeen=YES;
+            return;
+        }
+        if(event.type==NSEventTypeLeftMouseUp) {[app finishWindowDrag:event];return;}
         /* Our own global shortcuts already cancel or replace the transaction. */
         if(event.type==NSEventTypeKeyDown && (event.modifierFlags & NSEventModifierFlagControl) &&
            (event.modifierFlags & NSEventModifierFlagOption)) {
@@ -382,6 +417,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
             [app cancelActivation];app.quietUntil=NSDate.timeIntervalSinceReferenceDate+.3;
             [app setMessage:@"已停止窗口前置，继续你的操作；当前布局仍然生效。"];
         }
+        if(event.type==NSEventTypeLeftMouseDown)[app beginWindowDrag:event];
     }];
     self.localInputMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown|NSEventMaskRightMouseDown|NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event){
         FSApp *app=weakSelf;
@@ -452,6 +488,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)cancelActivation {
     FSPlacementCancelSwitch(&_placement);
     self.focusGeneration++;self.observedWindow=nil;
+    [self clearWindowDrag];
     self.dragGuard.targets=@[];
 }
 - (void)rememberAssignment:(FSWindow *)window slot:(NSInteger)slot {
@@ -484,6 +521,115 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         self.runtime[@(slot)]=window;[self rememberAssignment:window slot:slot];
     } else {bindings[slot]=[NSMutableDictionary new];[self.runtime removeObjectForKey:@(slot)];}
 }
+- (void)noteCreatedWindow:(id)element pid:(pid_t)pid {
+    if(!self.locked || _placement.switching || ![self.profile[@"newWindowInActiveSlot"] boolValue] ||
+       self.sleeping || self.sessionInactive || !element || !self.observedWindow ||
+       self.observedWindow.pid!=pid)return;
+    NSInteger active=-1;
+    for(int i=0;i<self.zoneCount;i++)if([self.observedWindow sameWindow:self.runtime[@(i)]]){active=i;break;}
+    if(active<0)return;
+    FSNewWindow *created=[FSNewWindow new];created.element=element;created.pid=pid;
+    created.activeSlot=active;created.parent=self.observedWindow;
+    created.createdAt=NSDate.timeIntervalSinceReferenceDate;created.profileID=self.profile[@"id"];
+    [self.newWindows addObject:created];
+    if(self.newWindows.count>24)[self.newWindows removeObjectAtIndex:0];
+}
+- (NSInteger)createdWindowActiveSlot:(FSWindow *)window {
+    NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    NSInteger slot=-1;
+    for(FSNewWindow *entry in [self.newWindows copy]) {
+        if(now-entry.createdAt>8 || ![entry.profileID isEqual:self.profile[@"id"]]) {
+            [self.newWindows removeObject:entry];continue;
+        }
+        if(window.pid!=entry.pid || !CFEqual((__bridge CFTypeRef)window.element,(__bridge CFTypeRef)entry.element))continue;
+        if(entry.activeSlot<self.zoneCount && [entry.parent sameWindow:self.runtime[@(entry.activeSlot)]])slot=entry.activeSlot;
+        [self.newWindows removeObject:entry];break;
+    }
+    return slot;
+}
+- (void)clearWindowDrag {
+    self.draggedWindow=nil;self.dragProfileID=nil;self.dragMotionSeen=NO;
+}
+- (void)beginWindowDrag:(NSEvent *)event {
+    [self clearWindowDrag];
+    self.lastMouseDown=NSDate.timeIntervalSinceReferenceDate;
+    if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
+       self.choosingWindow || self.menuOpen || self.sleeping || self.sessionInactive ||
+       NSApp.modalWindow || !AXIsProcessTrusted() || !FSScreenWithID(self.profile[@"display"]))return;
+    CGEventRef cg=event.CGEvent;if(!cg)return;
+    CGPoint point=CGEventGetLocation(cg);
+    FSWindow *window=FSWindowAtPoint(point);FSRect frame;
+    if(!window || ![window readFrame:&frame] || !FSTitleCandidate(frame,point.x,point.y))return;
+    self.draggedWindow=window;self.dragStartFrame=frame;self.dragProfileID=self.profile[@"id"];
+}
+- (void)finishWindowDrag:(NSEvent *)event {
+    FSWindow *window=self.draggedWindow;FSRect start=self.dragStartFrame;
+    BOOL moved=self.dragMotionSeen;
+    NSString *profileID=self.dragProfileID;
+    [self clearWindowDrag];
+    if(!window || !moved || !self.locked || _placement.switching ||
+       [self.profile[@"preventDrag"] boolValue] || ![profileID isEqual:self.profile[@"id"]] ||
+       self.choosingWindow || self.menuOpen || self.sleeping || self.sessionInactive ||
+       NSApp.modalWindow || !AXIsProcessTrusted())return;
+    CGEventRef cg=event.CGEvent;if(!cg)return;
+    FSRect actual;
+    if(![window isUsable] || ![window readFrame:&actual] || !FSWindowWasDragged(start,actual))return;
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
+    FSRect zones[4];int count=FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(screen),
+                                          [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones);
+    CGPoint point=CGEventGetLocation(cg);
+    int destination=FSDropZoneAt(zones,count,point.x,point.y);
+    self.lastMouseDown=NSDate.timeIntervalSinceReferenceDate;
+    self.quietUntil=self.lastMouseDown+.5;
+    if(destination<0)return; /* The ordinary layout check restores a managed window. */
+    int source=-1;unsigned pinned=0;
+    for(int i=0;i<count;i++) {
+        if([self slotPinned:i])pinned|=1u<<i;
+        if([window sameWindow:self.runtime[@(i)]])source=i;
+    }
+    /* A pin in a temporarily hidden zone still owns its exact window. */
+    for(int i=count;i<4;i++)if([self slotPinned:i]) {
+        FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=self.profile[@"bindings"][i];
+        if((hidden && [window sameWindow:hidden]) ||
+           (!hidden && [window.bundleID isEqual:binding[@"bundle"]] && [window.title isEqual:binding[@"title"]])) {
+            [window moveTo:start error:nil];
+            [self setMessage:@"这个窗口固定在当前布局暂未显示的分区；先取消固定再拖动换位。"];
+            return;
+        }
+    }
+    FSWindow *occupant=self.runtime[@(destination)];
+    FSDropAction action=FSDropChooseAction(count,source,destination,pinned,occupant!=nil);
+    if(action==FSDropIgnore)return;
+    if(action==FSDropBlocked) {
+        [window moveTo:start error:nil];
+        [self setMessage:@"固定的窗口或分区不能拖动换位；请先取消「固定此窗口」。"];
+        return;
+    }
+    if(action==FSDropSwap && (![occupant isUsable] || ![occupant isOnScreen:FSOnScreenRows()])) {
+        [window moveTo:start error:nil];
+        [self setMessage:@"目标分区窗口暂不可见，未交换；请先显示该窗口。"];
+        return;
+    }
+    [self rememberOriginal:window frame:start];
+    if(action==FSDropSwap) {
+        FSRect previous;if([occupant readFrame:&previous])[self rememberOriginal:occupant frame:previous];
+    }
+    [self storeWindow:window slot:destination];
+    if(action==FSDropSwap)[self storeWindow:occupant slot:source];
+    self.focusGeneration++;self.observedWindow=window;_placement.lastSlot=destination;
+    self.epoch++;[self.pending removeAllIndexes];
+    [self.suspended removeIndex:destination];[self.failures removeObjectForKey:@(destination)];
+    [self.targets removeObjectForKey:@(destination)];
+    if(source>=0){[self.suspended removeIndex:source];[self.failures removeObjectForKey:@(source)];[self.targets removeObjectForKey:@(source)];}
+    [self saveConfig];
+    [self arrangeSlot:destination manual:YES];
+    if(action==FSDropSwap)[self arrangeSlot:source manual:YES];
+    [self refreshDragTargets];
+    if(self.settingsWindow.visible){self.windowChoices=FSAvailableWindows();[self refreshControls];}
+    if([self.suspended containsIndex:destination] || (source>=0 && [self.suspended containsIndex:source]))return;
+    NSString *detail=action==FSDropSwap?@"已与原窗口交换":action==FSDropReplace?@"原窗口仍保持打开":@"已移动";
+    [self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · %@。",window.appName,destination+1,detail]];
+}
 - (void)scheduleAutomaticPlacement {
     if(!self.locked || _placement.switching)return;
     NSUInteger generation=++self.focusGeneration;
@@ -497,7 +643,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
     if(!self.locked || _placement.switching || self.sleeping || self.sessionInactive || self.menuOpen ||
        self.choosingWindow || NSApp.modalWindow || now<self.quietUntil ||
-       NSEvent.pressedMouseButtons!=0 || now-self.lastMouseDown<.25 || !AXIsProcessTrusted())return;
+       self.draggedWindow || NSEvent.pressedMouseButtons!=0 || now-self.lastMouseDown<.25 || !AXIsProcessTrusted())return;
     NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
     NSRunningApplication *front=NSWorkspace.sharedWorkspace.frontmostApplication;
     if(!front || front.processIdentifier==getpid() || front.activationPolicy!=NSApplicationActivationPolicyRegular)return;
@@ -530,13 +676,16 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
             occupied|=1u<<i;if([window sameWindow:other])known=i;
         } else if(other)[self.runtime removeObjectForKey:@(i)];
     }
+    NSInteger newlyCreatedSlot=[self createdWindowActiveSlot:window];
     if(known>=0 && [window sameWindow:self.observedWindow] &&
        [window.title isEqual:self.profile[@"bindings"][known][@"title"]])return;
     if(known<0)for(FSAssignment *entry in [self.histories[self.profile[@"id"]] reverseObjectEnumerator])
         if([window sameWindow:entry.window]){known=entry.slot;break;}
     if(known>=0 && [self slotPinned:known] && [window sameWindow:self.runtime[@(known)]])
         reserved&=~(1u<<known);
-    int slot=FSPlacementChooseAvailableSlot(&_placement,self.zoneCount,(int)known,occupied,reserved);
+    int slot=known>=0?FSPlacementChooseAvailableSlot(&_placement,self.zoneCount,(int)known,occupied,reserved):
+        FSPlacementChooseNewWindowSlot(&_placement,self.zoneCount,(int)newlyCreatedSlot,occupied,reserved,
+                                       [self.profile[@"newWindowInActiveSlot"] boolValue]);
     if(slot<0) {
         [self setMessage:@"所有分区已固定；新窗口保持原位置。可取消一个「固定此窗口」后继续自动接纳。"];
         return;
@@ -751,7 +900,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [extra addItem:[self item:@"用当前屏幕的窗口填满空格" action:@selector(autoFill:) value:nil]];
     [extra addItem:[self item:@"交换 / 轮换分区窗口" action:@selector(rotateWindows:) value:nil]];
     [extra addItem:[self item:@"仅整理一次，然后进入自由模式" action:@selector(arrangeOnce:) value:nil]];
-    NSMenuItem *drag=[self item:@"固定时阻止标题栏拖动   ⌃⌥L" action:@selector(toggleDragMode:) value:nil];
+    NSMenuItem *drag=[self item:@"阻止标题栏拖动（关闭可拖动换位）   ⌃⌥L" action:@selector(toggleDragMode:) value:nil];
     drag.state=[self.profile[@"preventDrag"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;[extra addItem:drag];
     [extra addItem:[self item:@"恢复分屏前的位置（本次运行）" action:@selector(restoreOriginals:) value:nil]];
     [extra addItem:NSMenuItem.separatorItem];
@@ -874,7 +1023,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     [v addSubview:label(@"拖动规则",NSMakeRect(26,568,114,22),11,YES)];
     self.lockModePopup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(139,565,284,29) pullsDown:NO];
-    [self.lockModePopup addItemsWithTitles:@[@"拖走后松手回位",@"阻止标题栏拖动"]];
+    [self.lockModePopup addItemsWithTitles:@[@"拖到分区换位",@"阻止标题栏拖动"]];
     self.lockModePopup.target=self;self.lockModePopup.action=@selector(lockModeChanged:);[v addSubview:self.lockModePopup];
     self.guardStatusLabel=label(@"",NSMakeRect(434,570,254,19),11,NO);[v addSubview:self.guardStatusLabel];
     self.moreButton=button(@"更多设置 →",NSMakeRect(755,562,201,33),self,@selector(toggleMore:));
@@ -898,6 +1047,11 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [advanced addSubview:self.permissionButton];
     [advanced addSubview:button(@"权限诊断",NSMakeRect(720,292,236,32),self,@selector(showPermissionDiagnostics:))];
     [advanced addSubview:label(@"固定窗口的位置只在自动分屏时维持；自由模式保留选择，允许自由摆放。",NSMakeRect(27,324,660,22),12,NO)];
+    self.newWindowCheckbox=[NSButton checkboxWithTitle:@"新建窗口优先放入当前活动分区" target:self action:@selector(newWindowPreferenceChanged:)];
+    self.newWindowCheckbox.frame=NSMakeRect(27,355,495,26);
+    self.newWindowCheckbox.toolTip=@"新建的普通窗口会替换当前未固定分区的窗口；已有窗口仍回原位或先填空格。";
+    [advanced addSubview:self.newWindowCheckbox];
+    [advanced addSubview:label(@"已固定的分区始终保留；关闭此项后，新窗口优先填空格。",NSMakeRect(510,357,448,22),11,NO)];
     self.launchCheckbox=[NSButton checkboxWithTitle:@"启动时打开设置窗口" target:self action:@selector(launchPreferenceChanged:)];
     self.launchCheckbox.frame=NSMakeRect(27,401,350,26);
     self.launchCheckbox.state=[NSUserDefaults.standardUserDefaults boolForKey:@"showSettingsOnLaunch"]?NSControlStateValueOn:NSControlStateValueOff;
@@ -978,7 +1132,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(!self.locked)self.guardStatusLabel.stringValue=@"自由模式 · 不固定窗口";
     else if(!trusted || !connected)self.guardStatusLabel.stringValue=@"条件未就绪 · 暂停调整";
     else if(self.choosingWindow || _placement.switching)self.guardStatusLabel.stringValue=@"操作期间暂不拦截拖动";
-    else if(![self.profile[@"preventDrag"] boolValue])self.guardStatusLabel.stringValue=@"自动分屏 · 拖走后松手回位";
+    else if(![self.profile[@"preventDrag"] boolValue])self.guardStatusLabel.stringValue=@"拖动标题栏到其他分区可换位";
     else self.guardStatusLabel.stringValue=self.dragGuard.running?@"自动分屏 · 阻止标题栏拖动":@"标题栏拦截不可用 · 松手回位";
     self.guardStatusLabel.textColor=NSColor.secondaryLabelColor;
     self.statusItem.button.title=self.statusItem.button.image?(self.locked?(!trusted || !connected?@" !":@" 自动"):@""):@"定屏";
@@ -1043,6 +1197,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     int kind=[p[@"layout"] intValue];
     [self.lockModePopup selectItemAtIndex:[p[@"preventDrag"] boolValue]?1:0];
+    self.newWindowCheckbox.state=[p[@"newWindowInActiveSlot"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
     for(NSButton *b in self.presetButtons)b.state=self.locked && [self matchesPreset:quickPresets()[b.tag]]?NSControlStateValueOn:NSControlStateValueOff;
     [self.layoutPopup selectItemAtIndex:kind];
     self.ratioSlider.doubleValue=[p[@"ratio"] doubleValue]*100;
@@ -1098,6 +1253,14 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)launchPreferenceChanged:(NSButton *)sender {
     [NSUserDefaults.standardUserDefaults setBool:sender.state==NSControlStateValueOn forKey:@"showSettingsOnLaunch"];
     [self setMessage:sender.state==NSControlStateValueOn?@"下次启动时会显示设置窗口。":@"配置完成后，下次启动将常驻菜单栏。首次升级和需要授权时仍会显示引导。"];
+}
+- (void)newWindowPreferenceChanged:(NSButton *)sender {
+    if(self.refreshing)return;
+    self.profile[@"newWindowInActiveSlot"]=@(sender.state==NSControlStateValueOn);
+    [self saveConfig];
+    [self setMessage:sender.state==NSControlStateValueOn?
+        @"新建窗口将优先进入当前活动分区；固定位置不受影响。":
+        @"新建窗口会先填未固定空格，空格用完后进入最近使用的分区。"];
 }
 - (void)useCurrentScreen:(id)sender {
     NSScreen *screen=self.settingsWindow.screen?:NSScreen.mainScreen;
@@ -1218,7 +1381,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(!self.locked)[self setMessage:@"拖动规则已保存。点击任一分屏布局即可生效。"];
     else if([self.profile[@"preventDrag"] boolValue] && self.dragGuard.running)
         [self setMessage:@"已阻止分区窗口的标题栏拖动，内容区仍可拖拽；选「自由模式」可自由移动。"];
-    else if(![self.profile[@"preventDrag"] boolValue])[self setMessage:@"已切换为松手回位，可以拖动窗口，松手后恢复布局。"];
+    else if(![self.profile[@"preventDrag"] boolValue])[self setMessage:@"可拖动窗口标题栏到其他分区：空格迁移，有窗口则交换；固定格不能被替换。"];
 }
 - (void)toggleDragMode:(id)sender {
     self.profile[@"preventDrag"]=@(![self.profile[@"preventDrag"] boolValue]);
@@ -1586,7 +1749,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)showHelp:(id)sender {
     [self cancelActivation];[self finishPicking];
     NSAlert *alert=[NSAlert new];alert.messageText=@"选择模式，窗口自动归位";
-    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和位置约束，窗口保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用并排列窗口。空分区从目标屏幕已有窗口中补充；不会自动启动已关闭的应用。\n\n固定指定窗口\n在分区一行选好窗口，勾选「固定此窗口」，或从菜单「将当前窗口固定到…」一步完成。固定分区不会被其他新窗口占用；临时关闭仍保留位置。取消勾选后恢复自动分配。\n\n以后激活窗口\n固定窗口始终回自己的分区；其他窗口优先填未固定空位。全满时进入最近使用的未固定分区。全都固定时，新窗口保持原位。\n\n更多设置\n可调布局比例、间距和目标显示器；拖动规则可在主界面选择。自由模式停止位置约束和标题栏拦截。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置，不关闭窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
+    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和位置约束，窗口保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用并排列窗口。空分区从目标屏幕已有窗口中补充；不会自动启动已关闭的应用。\n\n拖动换位\n在自动分屏时，拖动普通窗口的标题栏并把鼠标松在目标分区：空格迁移，有窗口就交换。固定的窗口和分区不能换位；选择「阻止标题栏拖动」可关闭这项操作。\n\n固定指定窗口\n在分区一行选好窗口，勾选「固定此窗口」，或从菜单「将当前窗口固定到…」一步完成。固定分区不会被其他新窗口占用；临时关闭仍保留位置。取消勾选后恢复自动分配。\n\n以后激活窗口\n固定窗口始终回自己的分区。更多设置默认开启「新建窗口优先放入当前活动分区」；关闭后新建窗口先填未固定空位。已有窗口优先回原位；固定分区不会被替换。\n\n更多设置\n可调布局比例、间距、目标显示器及新建窗口去向；拖动规则可在主界面选择。自由模式停止位置约束和标题栏拦截。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置，不关闭窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
     [alert addButtonWithTitle:@"知道了"];[alert addButtonWithTitle:@"完整说明"];
     [NSApp activateIgnoringOtherApps:YES];
     if([alert runModal]==NSAlertSecondButtonReturn) {

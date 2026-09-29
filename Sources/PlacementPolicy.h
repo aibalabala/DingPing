@@ -20,5 +20,9 @@ int FSPlacementChooseSlot(const FSPlacementState *state, int count, int knownSlo
 /* reserved marks slots owned by explicitly pinned windows. The caller handles
    a focused pinned window itself; all other automatic captures avoid them. */
 int FSPlacementChooseAvailableSlot(const FSPlacementState *state, int count, int knownSlot,
-                                   unsigned occupied, unsigned reserved);
+                                    unsigned occupied, unsigned reserved);
+/* Only for a confirmed newly created window. An unpinned active slot wins
+   even if other slots are empty; other windows keep the ordinary policy. */
+int FSPlacementChooseNewWindowSlot(const FSPlacementState *state, int count, int activeSlot,
+                                   unsigned occupied, unsigned reserved, bool preferActive);
 #endif

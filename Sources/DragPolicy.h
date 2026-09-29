@@ -9,4 +9,11 @@ typedef struct { bool consuming; } FSDragState;
    Content drags remain allowed even when they later cross a title bar. */
 bool FSFilterDrag(FSDragState *state, FSDragEvent event, bool enabled, bool confirmedTitle);
 bool FSTitleCandidate(FSRect window, double x, double y);
+
+typedef enum { FSDropIgnore, FSDropBlocked, FSDropMove, FSDropSwap, FSDropReplace } FSDropAction;
+/* A genuine title-bar translation can change assignments; resizing cannot. */
+bool FSWindowWasDragged(FSRect before, FSRect after);
+int FSDropZoneAt(const FSRect zones[4], int count, double x, double y);
+FSDropAction FSDropChooseAction(int count, int source, int target,
+                                unsigned pinned, bool targetOccupied);
 #endif
