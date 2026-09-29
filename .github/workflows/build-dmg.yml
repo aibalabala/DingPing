@@ -1,0 +1,94 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dingping-dmg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compile and test native arm64 App
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          mkdir -p "$RUNNER_TEMP/DingPing-build"
+          bash Scripts/build.sh "$RUNNER_TEMP/DingPing-build"
+          app="$RUNNER_TEMP/DingPing-build/定屏.app"
+          codesign --verify --deep --strict "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = local.dingping.fixedsplit
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = 0.4.0
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = 6
+          file "$app/Contents/MacOS/DingPing"
+
+      - name: Create and verify DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/DingPing-dmg"
+          mkdir -p "$staging" dist
+          ditto "$RUNNER_TEMP/DingPing-build/定屏.app" "$staging/定屏.app"
+          cp Installer/install_prebuilt.command "$staging/双击安装预编译版.command"
+          chmod 755 "$staging/双击安装预编译版.command"
+          cat > "$staging/安装说明.txt" <<'GUIDE'
+          定屏 v0.4.0（构建 6）· Apple Silicon DMG
+
+          1. 先从菜单栏退出旧版定屏。
+          2. 双击“安装预编译版.command”。它会验证应用后安装到 ~/Applications/定屏.app。
+          3. 在 系统设置 → 隐私与安全性 → 辅助功能 中为该准确路径授权。
+
+          这份程序使用临时签名，没有 Apple Developer ID 公证；macOS 可能提示需要手动确认打开。
+          已装好同一个构建时安装器不会反复替换或签名。
+          如果系统显示旧授权但程序未授权，请从仓库源码包运行“修复升级”工具。
+          GUIDE
+          dmg="$GITHUB_WORKSPACE/dist/DingPing-v0.4.0-macOS-arm64.dmg"
+          hdiutil create -volname '定屏 v0.4.0' -srcfolder "$staging" -format UDZO -ov "$dmg"
+          hdiutil verify "$dmg"
+          ( cd dist && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256" )
+
+      - name: Upload download artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DingPing-v0.4.0-macOS-arm64
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish first successful v0.4.0 build
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v0.4.0
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists. Keep its signed DMG unchanged; this run is available as an Actions artifact."
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          定屏 v0.4.0（构建 6），适用于 Apple Silicon Mac，要求 macOS 13 或更新版本。
+
+          下载 DMG 后打开，双击其中的“安装预编译版.command”，安装到个人文件夹的 Applications，并手动授予辅助功能权限。仓库同时保留完整源码和本机编译安装脚本。
+
+          此 DMG 经 GitHub 的 macOS ARM64 runner 编译、运行核心测试并校验签名与磁盘映像；没有 Developer ID 签名或 Apple 公证，实际窗口行为仍需在用户 Mac 上验证。不同构建的临时签名可能需要重新授权。
+          NOTES
+          gh release create "$tag" dist/*.dmg dist/*.sha256 \
+            --target "$GITHUB_SHA" \
+            --title '定屏 v0.4.0 · macOS Apple Silicon DMG' \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

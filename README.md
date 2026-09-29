@@ -15,13 +15,15 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 ## 安装
 
-要求 macOS 13 或更新版本，及 Apple Command Line Tools。下载仓库 ZIP 并**完整解压**，退出所有正在运行的定屏，然后双击 `双击安装.command`。脚本在你的 Mac 上编译、校验、签名，安装到：
+要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) 下载 `DingPing-v0.4.0-macOS-arm64.dmg`。打开 DMG 后双击其中的 `双击安装预编译版.command`，它会核对版本和签名、备份旧应用，安装到：
 
 ```text
 ~/Applications/定屏.app
 ```
 
-没有提供预编译或公证过的 `.app`。第一次运行请在「系统设置 → 隐私与安全性 → 辅助功能」为这个准确路径的 App 打开权限。之后在菜单栏中点击布局图标；新安装默认为自由模式。
+预编译 DMG 不要求 Command Line Tools。第一次运行请在「系统设置 → 隐私与安全性 → 辅助功能」为这个准确路径的 App 打开权限。之后在菜单栏中点击布局图标；新安装默认为自由模式。当前 DMG 使用临时签名，**没有 Apple Developer ID 公证**，系统可能要求你手动确认打开。
+
+需要在自己的 Mac 上从源码编译时，先安装 Apple Command Line Tools，下载仓库 ZIP 并**完整解压**，退出所有正在运行的定屏，然后双击 `双击安装.command`。脚本会在当前 Mac 上编译、校验和本地签名，也安装到上述路径。
 
 如果更新后只看到旧版、或者权限开关开启但 App 显示未授权：先从菜单栏「退出定屏」，双击 `双击修复升级.command`。工具会先验证或完成安装，然后引导你重新添加当前 App。列表中的名称仍是「定屏」，请用脚本打印的**完整路径**确认版本；可用 `检查已安装版本.command` 只读检查。
 
@@ -31,7 +33,7 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 原生 Objective-C / AppKit，核心分区与拖动规则为 C；不依赖第三方运行库。主要文件在 `Sources/`，本机编译脚本在 `Scripts/build.sh`，测试在 `Tests/`。
 
-已在 Linux 上通过 60,021 条分区计算断言、拖动和自动归位规则测试、22 项安装策略与回滚模拟场景、Shell 语法和 ZIP 完整性检查。本制作环境没有 macOS SDK，**v0.4.0 尚未在真实 Mac 上完成原生编译及窗口行为验证**。Mac 验收清单见 [Tests/MAC_ACCEPTANCE.md](Tests/MAC_ACCEPTANCE.md)。
+已在 Linux 上通过 60,021 条分区计算断言、拖动和自动归位规则测试、22 项安装策略与回滚模拟场景、Shell 语法和 ZIP 完整性检查。GitHub Actions 使用 macOS ARM64 runner 原生编译、运行核心测试并校验 DMG；工作流结果可在 [Actions](https://github.com/aibalabala/DingPing/actions) 查看。**实际窗口、焦点和辅助功能授权仍需在用户 Mac 上验证。**Mac 验收清单见 [Tests/MAC_ACCEPTANCE.md](Tests/MAC_ACCEPTANCE.md)。
 
 目前采用 Mac 本地临时签名；更换应用构建后可能需要重新授予辅助功能权限。工具不会自动代替用户授予系统权限。
 
