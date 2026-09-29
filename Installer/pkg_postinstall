@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+system_app=/Applications/定屏.app
+bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$system_app/Contents/Info.plist" 2>/dev/null || true)"
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$system_app/Contents/Info.plist" 2>/dev/null || true)"
+build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$system_app/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$bundle_id" != local.dingping.fixedsplit || "$version" != 0.5.7 || "$build" != 14 ]] ||
+   ! /usr/bin/codesign --verify --deep --strict "$system_app" >/dev/null 2>&1; then
+  echo '安装后的定屏完整性检查失败；旧版备份保留在用户 Library/Application Support/定屏/Backups。' >&2
+  exit 1
+fi
+
+console_user="$(/usr/bin/stat -f '%Su' /dev/console)"
+user_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/sed 's/^NFSHomeDirectory: //')"
+old_app="$user_home/Applications/定屏.app"
+if [[ -d "$old_app" && ! -L "$old_app" ]]; then
+  old_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$old_app/Contents/Info.plist" 2>/dev/null || true)"
+  if [[ "$old_id" != local.dingping.fixedsplit ]]; then
+    echo '个人 Applications 中有其他同名应用，未移动。' >&2
+    exit 1
+  fi
+  trash="$user_home/.Trash"
+  /bin/mkdir -p "$trash"
+  destination="$(/usr/bin/mktemp -d "$trash/定屏旧版.XXXXXX")"
+  /bin/mv "$old_app" "$destination/定屏.app"
+  /usr/sbin/chown -R "$console_user" "$destination"
+  echo "个人 Applications 的旧定屏已移到废纸篓：$destination/定屏.app"
+fi
+echo '定屏已安装到 /Applications/定屏.app。请在 Finder 中启动，并按应用内提示检查辅助功能授权。'

@@ -183,13 +183,13 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @interface FSRestore : NSObject
 @property(nonatomic,strong) FSWindow *window;
 @property(nonatomic) FSRect frame;
-@property(nonatomic) FSRect visibleFrame;
 @end
 @implementation FSRestore @end
 
 @interface FSDragSnapshot : NSObject
 @property(nonatomic,strong) FSWindow *window;
 @property(nonatomic) FSRect frame;
+@property(nonatomic) FSRect visibleFrame;
 @property(nonatomic) FSRect movedFrame;
 @property(nonatomic) BOOL movedDuringDrag;
 @property(nonatomic) BOOL pointerEligible;
@@ -523,7 +523,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)showTranslocatedWarning {
     NSAlert *alert=[NSAlert new];
     alert.messageText=@"请先安装定屏，再从「应用程序」启动";
-    alert.informativeText=@"当前打开的是 macOS 隔离的临时副本。请退出定屏，在下载的 DMG 顶层双击「双击安装预编译版.command」；完成后从 ~/Applications/定屏.app 启动。已安装的旧版不会因直接打开 DMG 内的 App 而升级。";
+    alert.informativeText=@"当前打开的是 macOS 隔离的临时副本。请退出定屏，双击下载的 .pkg 安装包；若下载的是 DMG，先打开它，再双击里面的「双击安装定屏.pkg」。完成后从 /Applications/定屏.app 启动。";
     [alert addButtonWithTitle:@"退出并安装"];[alert addButtonWithTitle:@"暂时继续"];
     [NSApp activateIgnoringOtherApps:YES];
     if([alert runModal]==NSAlertFirstButtonReturn)[NSApp terminate:nil];
@@ -1174,7 +1174,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.guideDetail.maximumNumberOfLines=2;self.guideDetail.lineBreakMode=NSLineBreakByWordWrapping;
     [self.guideDetail.cell setUsesSingleLineMode:NO];[guide addSubview:self.guideDetail];
     self.repairButton=button(@"修复旧版授权",NSMakeRect(594,14,164,32),self,@selector(repairOldPermission:));
-    self.repairButton.toolTip=@"退出定屏后，在终端引导你移除旧记录并重新授权准确路径。";
+    self.repairButton.toolTip=@"退出定屏后，引导你移除旧记录并重新授权当前安装路径。";
     [guide addSubview:self.repairButton];
     self.guideButton=button(@"",NSMakeRect(762,14,158,32),self,NULL);[guide addSubview:self.guideButton];
 
@@ -1932,13 +1932,13 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [self cancelActivation];[self finishPicking];
     NSURL *tool=[NSBundle.mainBundle URLForResource:@"修复定屏授权" withExtension:@"command"];
     if(!tool) {
-        [self setMessage:@"应用中缺少授权修复工具。请从最新 DMG 双击「双击修复定屏授权.command」。"];
+        [self setMessage:@"应用中缺少授权修复工具。请使用最新 DMG「高级安装」内的授权修复工具。"];
         return;
     }
     if([NSWorkspace.sharedWorkspace openURL:tool]) {
         [NSApp terminate:nil];
     } else {
-        [self setMessage:@"未能打开终端修复工具。请从 DMG 双击「双击修复定屏授权.command」。"];
+        [self setMessage:@"未能打开授权修复工具。请使用 DMG「高级安装」内的授权修复工具。"];
     }
 }
 - (void)revealCurrentApp:(id)sender {
@@ -1957,9 +1957,9 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
         trusted?@"已授权":@"未授权",dragStatus,bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
         trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
-        @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从个人 Applications 重新添加这份应用并开启。"];
+        @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从上方显示的准确路径重新添加并开启。"];
     if([bundle.bundlePath containsString:@"/AppTranslocation/"])
-        diagnostic=[diagnostic stringByAppendingString:@"\n\n当前正在运行 DMG 隔离的临时副本。请退出，在 DMG 顶层双击「双击安装预编译版.command」，再从 ~/Applications/定屏.app 启动。"];
+        diagnostic=[diagnostic stringByAppendingString:@"\n\n当前正在运行 DMG 隔离的临时副本。请退出，运行下载的 .pkg，或双击 DMG 内的「双击安装定屏.pkg」，再从 /Applications/定屏.app 启动。"];
     NSAlert *alert=[NSAlert new];alert.messageText=@"定屏 · 权限诊断";alert.informativeText=diagnostic;
     [alert addButtonWithTitle:@"关闭"];[alert addButtonWithTitle:@"在 Finder 中显示"];[alert addButtonWithTitle:@"复制诊断"];
     [NSApp activateIgnoringOtherApps:YES];

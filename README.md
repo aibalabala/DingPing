@@ -20,19 +20,19 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 ## 安装
 
-要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) 下载 `DingPing-v0.5.7-macOS-arm64.dmg`。打开 DMG 后，双击顶层的 `双击安装预编译版.command`；DMG 的 `安装资源` 文件夹只供安装器使用。安装器会请求旧版退出，核对版本和签名、备份并替换旧应用；若 `/Applications/定屏.app` 中另有经验证的定屏副本，会移到废纸篓。更换签名时会接着引导修复授权，安装到：
+要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) **直接下载 `DingPing-v0.5.7-macOS-arm64.pkg`，双击按图形界面安装**。也可下载 DMG，双击打开后再双击顶层的 `双击安装定屏.pkg`。先从菜单栏退出正在运行的定屏。安装器会核对旧副本、备份旧 App，安装成功后把 `~/Applications` 中经验证的旧副本移到废纸篓。新位置是：
 
 ```text
-~/Applications/定屏.app
+/Applications/定屏.app
 ```
 
-预编译 DMG 不要求 Command Line Tools。第一次运行请在「系统设置 → 隐私与安全性 → 辅助功能」为这个准确路径的 App 打开权限。之后在菜单栏中点击布局图标；新安装默认为自由模式。当前 DMG 使用临时签名，**没有 Apple Developer ID 公证**，系统可能要求你手动确认打开。
+预编译安装不要求 Command Line Tools。第一次运行请在「系统设置 → 隐私与安全性 → 辅助功能」为这个准确路径的 App 打开权限。之后在菜单栏中点击布局图标；新安装默认为自由模式。当前 App 使用临时签名，安装包**没有 Apple Developer ID 公证**，系统可能要求你按住 Control 点击安装包并选「打开」。
 
-若诊断中的路径包含 `/AppTranslocation/`，当前运行的是隔离的临时副本，说明还没有从安装后的路径启动。退出它，双击 DMG 顶层的安装脚本，再从 `~/Applications/定屏.app` 打开；新版启动时也会显示这一提醒。
+若诊断中的路径包含 `/AppTranslocation/`，当前运行的是隔离的临时副本，说明还没有从安装后的路径启动。退出它，运行 `.pkg` 安装包，再从 `/Applications/定屏.app` 打开；新版启动时也会显示这一提醒。
 
 需要在自己的 Mac 上从源码编译时，先安装 Apple Command Line Tools，下载仓库 ZIP 并**完整解压**，退出所有正在运行的定屏，然后双击 `双击安装.command`。脚本会在当前 Mac 上编译、校验和本地签名，也安装到上述路径。
 
-若已安装后仍显示「等待授权」，双击 DMG 内的 `双击修复定屏授权.command`，或点应用界面的「修复旧版授权」。它会核对 v0.5.7、退出定屏，仅尝试清理定屏自己的旧记录，然后引导你移除辅助功能列表中的旧条目，从 `~/Applications` 选中当前 `定屏.app` 并开启开关。源码包仍提供 `双击修复升级.command`；可用 `检查已安装版本.command` 只读检查。
+若已安装后仍显示「等待授权」，点应用界面的「修复旧版授权」，或使用 DMG「高级安装」里的授权修复工具。它会核对 v0.5.7、退出定屏，仅尝试清理定屏自己的旧记录，然后引导你移除辅助功能列表中的旧条目，从准确的安装路径选中当前 `定屏.app` 并开启开关。源码包仍提供 `双击修复升级.command`；可用 `检查已安装版本.command` 只读检查。
 
 安装失败可运行 `检查安装环境.command`。不会覆盖标识不同的同名项目，也不会用旧包覆盖已安装的更高版本。更多操作见[安装修复说明](本次安装修复.txt)与[权限说明](权限修复说明.txt)。
 

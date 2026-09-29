@@ -7,10 +7,13 @@ if [[ "$(/usr/bin/uname -s)" != Darwin ]]; then echo '请在 Mac 上运行。'; 
 if [[ "$(/usr/bin/uname -m)" != arm64 ]]; then echo '此 DMG 适用于 Apple Silicon Mac。'; exit 1; fi
 
 dmg_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "$dmg_dir/.dingping-install.sh" && -f "$dmg_dir/../.dingping-install.sh" ]]; then
+  dmg_dir="$(cd "$dmg_dir/.." && pwd)"
+fi
 if [[ ! -f "$dmg_dir/.dingping-install.sh" ]]; then echo 'DMG 缺少安装组件，请重新下载完整映像。'; exit 1; fi
 source "$dmg_dir/.dingping-install.sh"
 DP_BUNDLE_ID=local.dingping.fixedsplit
-source_app="$dmg_dir/安装资源/定屏.app"
+source_app="$dmg_dir/.安装资源/定屏.app"
 install_root="$HOME/Applications"
 target_app="$install_root/定屏.app"
 log_dir="$HOME/Library/Logs/定屏"
@@ -162,8 +165,8 @@ if [[ -n "$previous_hash" && "$previous_hash" != "$source_hash" ]]; then needs_r
 if [[ "$other_same_id" == 1 ]]; then needs_repair=1; fi
 if [[ "$needs_repair" == 1 ]]; then
   echo '检测到旧签名或同标识副本。旧版的辅助功能开关不能代表新版已获授权。'
-  if [[ -t 0 && -f "$dmg_dir/双击修复定屏授权.command" ]]; then
-    if /bin/bash "$dmg_dir/双击修复定屏授权.command" --from-installer; then
+  if [[ -t 0 && -f "$dmg_dir/高级安装/双击修复定屏授权.command" ]]; then
+    if /bin/bash "$dmg_dir/高级安装/双击修复定屏授权.command" --from-installer; then
       echo '授权引导已完成；请以新应用内的「权限诊断」为准。'
     else
       echo '应用已经安装，授权引导尚未完成。稍后可双击 DMG 里的「双击修复定屏授权.command」。'
