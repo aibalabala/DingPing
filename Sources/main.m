@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.3";
+static NSString *const FSVersion=@"0.5.4";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -140,6 +140,42 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 }
 @end
 
+@interface FSDragOverlayView : FSFlippedView
+@property(nonatomic,copy) NSArray<NSValue *> *zoneRects;
+@property(nonatomic) unsigned pinnedMask;
+@property(nonatomic) NSInteger sourceSlot;
+@property(nonatomic) NSInteger targetSlot;
+@property(nonatomic) BOOL sourcePinned;
+@end
+@implementation FSDragOverlayView
+- (void)drawRect:(NSRect)dirtyRect {
+    for(NSUInteger i=0;i<self.zoneRects.count;i++) {
+        NSRect r=NSInsetRect(self.zoneRects[i].rectValue,5,5);
+        if(r.size.width<=12 || r.size.height<=12)continue;
+        BOOL targetPinned=(self.pinnedMask & (1u<<i))!=0;
+        BOOL fixed=self.sourcePinned || targetPinned;
+        BOOL selected=(NSInteger)i==self.targetSlot;
+        NSColor *color=fixed?NSColor.systemOrangeColor:NSColor.systemTealColor;
+        NSBezierPath *outline=[NSBezierPath bezierPathWithRoundedRect:r xRadius:12 yRadius:12];
+        [[color colorWithAlphaComponent:selected ? .23 : .075] setFill];[outline fill];
+        [[color colorWithAlphaComponent:selected ? .95 : .55] setStroke];
+        outline.lineWidth=selected?4:2;[outline stroke];
+        NSString *caption=targetPinned?[NSString stringWithFormat:@"%lu · 已固定",(unsigned long)i+1]:
+            (self.sourcePinned?[NSString stringWithFormat:@"%lu · 来源已固定",(unsigned long)i+1]:
+            (selected?[NSString stringWithFormat:@"松手放到区域 %lu",(unsigned long)i+1]:
+             ((NSInteger)i==self.sourceSlot?[NSString stringWithFormat:@"当前区域 %lu",(unsigned long)i+1]:
+              [NSString stringWithFormat:@"区域 %lu",(unsigned long)i+1])));
+        NSRect badge=NSMakeRect(NSMinX(r)+12,NSMinY(r)+12,MIN(NSWidth(r)-24,168),30);
+        if(badge.size.width<60)continue;
+        [[color colorWithAlphaComponent:.93] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:badge xRadius:9 yRadius:9] fill];
+        [caption drawInRect:NSInsetRect(badge,8,6) withAttributes:@{
+            NSFontAttributeName:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName:NSColor.whiteColor}];
+    }
+}
+@end
+
 @interface FSRestore : NSObject
 @property(nonatomic,strong) FSWindow *window;
 @property(nonatomic) FSRect frame;
@@ -192,9 +228,12 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) id localInputMonitor;
 @property(nonatomic,strong) FSWindow *observedWindow;
 @property(nonatomic,copy) NSArray<FSDragSnapshot *> *dragSnapshots;
+@property(nonatomic,strong) NSPanel *dragOverlay;
+@property(nonatomic,strong) FSDragOverlayView *dragOverlayView;
 @property(nonatomic) BOOL dragMotionSeen;
 @property(nonatomic,copy) NSString *dragProfileID;
 @property(nonatomic) NSUInteger dragGeneration;
+@property(nonatomic) NSTimeInterval lastDragOverlayUpdate;
 @property(nonatomic,copy) NSString *lastDragResult;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableArray<FSAssignment *> *> *histories;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSDictionary<NSNumber *,FSWindow *> *> *runtimeCache;
@@ -278,6 +317,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)rememberAssignment:(FSWindow *)window slot:(NSInteger)slot;
 - (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot;
 - (void)beginWindowDrag:(NSEvent *)event;
+- (void)updateDragOverlay:(NSEvent *)event;
 - (void)finishWindowDrag:(NSEvent *)event;
 - (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point profile:(NSString *)profileID;
 - (void)clearWindowDrag;
@@ -414,7 +454,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSApp *app=weakSelf;
         if(!app)return;
         if(event.type==NSEventTypeLeftMouseDragged) {
-            if(app.dragSnapshots.count)app.dragMotionSeen=YES;
+            if(app.dragSnapshots.count){app.dragMotionSeen=YES;[app updateDragOverlay:event];}
             return;
         }
         if(event.type==NSEventTypeLeftMouseUp) {[app finishWindowDrag:event];return;}
@@ -562,7 +602,9 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     return slot;
 }
 - (void)clearWindowDrag {
+    [self.dragOverlay orderOut:nil];
     self.dragSnapshots=nil;self.dragProfileID=nil;self.dragMotionSeen=NO;
+    self.lastDragOverlayUpdate=0;
     self.dragGeneration++;
 }
 - (void)beginWindowDrag:(NSEvent *)event {
@@ -596,6 +638,62 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     self.dragSnapshots=snapshots;self.dragProfileID=snapshots.count?self.profile[@"id"]:nil;
     self.lastDragResult=snapshots.count?@"已识别窗口，等待拖动":@"未识别起点窗口；请抓住标题栏或工具栏空白处";
+}
+- (void)updateDragOverlay:(NSEvent *)event {
+    if(!self.locked || [self.profile[@"preventDrag"] boolValue] || !self.dragSnapshots.count ||
+       ![self.dragProfileID isEqual:self.profile[@"id"]] || self.menuOpen || self.sleeping || self.sessionInactive)return;
+    NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    if(now-self.lastDragOverlayUpdate<.08)return;
+    self.lastDragOverlayUpdate=now;
+    FSWindow *moving=nil;FSRect actual;
+    for(FSDragSnapshot *snapshot in self.dragSnapshots) {
+        FSRect frame;
+        if([snapshot.window readFrame:&frame] && FSWindowWasDragged(snapshot.frame,frame)) {
+            moving=snapshot.window;actual=frame;break;
+        }
+    }
+    if(!moving){[self.dragOverlay orderOut:nil];return;}
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
+    FSRect usable=FSUsableFrame(screen),zones[4];
+    int count=FSBuildZones([self.profile[@"layout"] intValue],usable,
+                           [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones);
+    int source=-1;unsigned pinned=0;BOOL sourcePinned=NO;
+    for(int i=0;i<count;i++) {
+        if([self slotPinned:i])pinned|=1u<<i;
+        if([moving sameWindow:self.runtime[@(i)]])source=i;
+    }
+    if(source>=0)sourcePinned=[self slotPinned:source];
+    for(int i=count;i<4 && !sourcePinned;i++)if([self slotPinned:i]) {
+        FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=self.profile[@"bindings"][i];
+        sourcePinned=(hidden && [moving sameWindow:hidden]) ||
+            (!hidden && [moving.bundleID isEqual:binding[@"bundle"]] && [moving.title isEqual:binding[@"title"]]);
+    }
+    CGPoint point=mouseAXPoint(event);
+    int target=FSDropDestination(zones,count,source,point.x,point.y,actual);
+    NSRect frame=screen.visibleFrame;
+    if(!self.dragOverlay) {
+        self.dragOverlay=[[NSPanel alloc] initWithContentRect:frame
+            styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel
+            backing:NSBackingStoreBuffered defer:NO];
+        self.dragOverlay.opaque=NO;self.dragOverlay.backgroundColor=NSColor.clearColor;
+        self.dragOverlay.hasShadow=NO;self.dragOverlay.ignoresMouseEvents=YES;
+        self.dragOverlay.hidesOnDeactivate=NO;self.dragOverlay.level=NSFloatingWindowLevel;
+        self.dragOverlay.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorTransient;
+        self.dragOverlayView=[[FSDragOverlayView alloc] initWithFrame:NSMakeRect(0,0,frame.size.width,frame.size.height)];
+        self.dragOverlay.contentView=self.dragOverlayView;
+    }
+    [self.dragOverlay setFrame:frame display:NO];
+    self.dragOverlayView.frame=NSMakeRect(0,0,frame.size.width,frame.size.height);
+    NSMutableArray<NSValue *> *rects=[NSMutableArray new];
+    for(int i=0;i<count;i++) {
+        FSRect zone=zones[i];
+        [rects addObject:[NSValue valueWithRect:NSMakeRect(zone.x-usable.x,zone.y-usable.y,zone.width,zone.height)]];
+    }
+    self.dragOverlayView.zoneRects=rects;
+    self.dragOverlayView.pinnedMask=pinned;self.dragOverlayView.sourceSlot=source;
+    self.dragOverlayView.sourcePinned=sourcePinned;self.dragOverlayView.targetSlot=target==source?-1:target;
+    self.dragOverlayView.needsDisplay=YES;
+    if(!self.dragOverlay.visible)[self.dragOverlay orderFrontRegardless];
 }
 - (void)finishWindowDrag:(NSEvent *)event {
     NSArray<FSDragSnapshot *> *snapshots=self.dragSnapshots;
@@ -1814,7 +1912,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)showHelp:(id)sender {
     [self cancelActivation];[self finishPicking];
     NSAlert *alert=[NSAlert new];alert.messageText=@"选择模式，窗口自动归位";
-    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和位置约束，窗口保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用并排列窗口。空分区从目标屏幕已有窗口中补充；不会自动启动已关闭的应用。\n\n拖动换位\n在自动分屏时，拖动普通窗口的标题栏并把鼠标松在目标分区：空格迁移，有窗口就交换。固定的窗口和分区不能换位；选择「阻止标题栏拖动」可关闭这项操作。\n\n固定指定窗口\n在分区一行选好窗口，勾选「固定此窗口」，或从菜单「将当前窗口固定到…」一步完成。固定分区不会被其他新窗口占用；临时关闭仍保留位置。取消勾选后恢复自动分配。\n\n以后激活窗口\n固定窗口始终回自己的分区。更多设置默认开启「新建窗口优先放入当前活动分区」；关闭后新建窗口先填未固定空位。已有窗口优先回原位；固定分区不会被替换。\n\n更多设置\n可调布局比例、间距、目标显示器及新建窗口去向；拖动规则可在主界面选择。自由模式停止位置约束和标题栏拦截。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置，不关闭窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
+    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和位置约束，窗口保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用并排列窗口。空分区从目标屏幕已有窗口中补充；不会自动启动已关闭的应用。\n\n拖动换位\n在自动分屏时，拖动普通窗口的标题栏并把鼠标松在目标分区：窗口开始移动后会显示目标分区边框，当前落点高亮，固定分区标为不可替换。空格迁移，有窗口就交换；选择「阻止标题栏拖动」可关闭换位。\n\n固定指定窗口\n在分区一行选好窗口，勾选「固定此窗口」，或从菜单「将当前窗口固定到…」一步完成。固定分区不会被其他新窗口占用；临时关闭仍保留位置。取消勾选后恢复自动分配。\n\n以后激活窗口\n固定窗口始终回自己的分区。更多设置默认开启「新建窗口优先放入当前活动分区」；关闭后新建窗口先填未固定空位。已有窗口优先回原位；固定分区不会被替换。\n\n更多设置\n可调布局比例、间距、目标显示器及新建窗口去向；拖动规则可在主界面选择。自由模式停止位置约束和标题栏拦截。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置，不关闭窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
     [alert addButtonWithTitle:@"知道了"];[alert addButtonWithTitle:@"完整说明"];
     [NSApp activateIgnoringOtherApps:YES];
     if([alert runModal]==NSAlertSecondButtonReturn) {

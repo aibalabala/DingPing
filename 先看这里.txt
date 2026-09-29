@@ -1,6 +1,6 @@
-定屏 v0.5.3（构建 10）· 先看这里
+定屏 v0.5.4（构建 11）· 先看这里
 
-Apple Silicon Mac：建议从 GitHub Releases 下载 DingPing-v0.5.3-macOS-arm64.dmg。
+Apple Silicon Mac：建议从 GitHub Releases 下载 DingPing-v0.5.4-macOS-arm64.dmg。
 打开 DMG，双击「双击安装预编译版.command」。
 安装器会请求旧版退出、验证签名，备份并替换个人 Applications 中的旧 App；
 若 /Applications/定屏.app 是经核对的定屏旧副本，会移到废纸篓。
@@ -10,7 +10,7 @@ Apple Silicon Mac：建议从 GitHub Releases 下载 DingPing-v0.5.3-macOS-arm64
 本源码文件夹还提供「双击安装.command」：需要 Apple Command Line Tools，
 在你自己的 Mac 上编译并安装同一版本。请完整解压后使用。
 
-安装后在定屏的「权限诊断」核对版本 0.5.3、构建 10 和应用完整路径。
+安装后在定屏的「权限诊断」核对版本 0.5.4、构建 11 和应用完整路径。
 若辅助功能开关显示开启、定屏却仍提示未授权，先退出定屏，
 优先双击 DMG 内「双击修复定屏授权.command」；源码安装可用「双击修复升级.command」。按终端提示为当前这份 App 重新授权。
 系统列表中的应用名称始终是「定屏」，不要仅凭名字判断新旧版本。
@@ -21,6 +21,7 @@ Apple Silicon Mac：建议从 GitHub Releases 下载 DingPing-v0.5.3-macOS-arm64
 新窗口不会占用固定位置。选择自由模式可暂停自动摆放。
 默认新建窗口优先放进当前活动分区，可在「更多设置」关闭。
 自动分屏时拖动标题栏到目标分区松手，可移动或交换未固定的窗口。
+窗口开始移动后会出现分区提示；固定分区标为不可替换，松手后提示消失。
 若没有换位，确认主页选择「拖到分区换位」，再到「权限诊断」查看最近一次拖动判定。
 主页和更多设置页均无滚动条；详细规则见「使用说明.md」。
 
