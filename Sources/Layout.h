@@ -11,6 +11,10 @@ typedef enum {
     FSLayoutGrid,
     FSLayoutRows2,
     FSLayoutFill,
+    FSLayoutStackAndMain,
+    FSLayoutMainTopAndColumns,
+    FSLayoutRows3,
+    FSLayoutMainAndThree,
     FSLayoutCount
 } FSLayout;
 

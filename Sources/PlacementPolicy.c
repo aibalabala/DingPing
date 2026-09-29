@@ -22,8 +22,16 @@ bool FSPlacementFinishSwitch(FSPlacementState *state, uint64_t token) {
     return true;
 }
 int FSPlacementChooseSlot(const FSPlacementState *state, int count, int knownSlot, unsigned occupied) {
+    return FSPlacementChooseAvailableSlot(state,count,knownSlot,occupied,0);
+}
+int FSPlacementChooseAvailableSlot(const FSPlacementState *state, int count, int knownSlot,
+                                   unsigned occupied, unsigned reserved) {
     if(!state->enabled || state->switching || count<1 || count>4)return -1;
-    if(knownSlot>=0 && knownSlot<count)return knownSlot;
-    for(int slot=0;slot<count;++slot)if(!(occupied & (1u<<slot)))return slot;
-    return state->lastSlot>=0 && state->lastSlot<count?state->lastSlot:0;
+    if(knownSlot>=0 && knownSlot<count && !(reserved & (1u<<knownSlot)))return knownSlot;
+    for(int slot=0;slot<count;++slot)
+        if(!(reserved & (1u<<slot)) && !(occupied & (1u<<slot)))return slot;
+    if(state->lastSlot>=0 && state->lastSlot<count && !(reserved & (1u<<state->lastSlot)))
+        return state->lastSlot;
+    for(int slot=0;slot<count;++slot)if(!(reserved & (1u<<slot)))return slot;
+    return -1;
 }

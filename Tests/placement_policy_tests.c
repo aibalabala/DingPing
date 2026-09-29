@@ -12,6 +12,13 @@ int main(void) {
     assert(FSPlacementChooseSlot(&state,2,-1,3)==1); /* New chat replaces right. */
     assert(FSPlacementChooseSlot(&state,2,0,3)==0); /* Browser returns left. */
     assert(FSPlacementChooseSlot(&state,2,1,1)==1); /* Minimized doc keeps its slot. */
+    assert(FSPlacementChooseAvailableSlot(&state,2,-1,0,1)==1); /* Closed pinned slot stays reserved. */
+    assert(FSPlacementChooseAvailableSlot(&state,2,0,3,1)==1); /* Old history cannot evict pin. */
+    assert(FSPlacementChooseAvailableSlot(&state,2,-1,3,3)==-1); /* No replaceable slot. */
+    assert(FSPlacementChooseAvailableSlot(&state,4,-1,15,11u)==2);
+    assert(FSPlacementChooseAvailableSlot(&state,4,2,15,11u)==2);
+    state.lastSlot=0;
+    assert(FSPlacementChooseAvailableSlot(&state,3,-1,7,1)==1);
     state.lastSlot=3;
     assert(FSPlacementChooseSlot(&state,2,3,3)==0); /* Four -> two, no out of bounds. */
     assert(FSPlacementChooseSlot(&state,0,-1,0)==-1);
@@ -41,6 +48,16 @@ int main(void) {
                 for(int earlier=0;earlier<result;++earlier)assert(mask&(1u<<earlier));
             }
         }
-    puts("PASS: free mode, empty-first placement, returning windows, full-layout replacement, layout shrink, switch cancellation and last-click wins.");
+    for(int count=1;count<=4;++count)for(unsigned pins=0;pins<16;++pins)
+        for(unsigned occupied=0;occupied<16;++occupied)for(int known=-1;known<5;++known) {
+            int chosen=FSPlacementChooseAvailableSlot(&state,count,known,occupied,pins);
+            unsigned active=(1u<<count)-1u;
+            if((pins&active)==active)assert(chosen==-1);
+            else {
+                assert(chosen>=0 && chosen<count && !(pins&(1u<<chosen)));
+                if(known>=0 && known<count && !(pins&(1u<<known)))assert(chosen==known);
+            }
+        }
+    puts("PASS: free mode, pin reservations, empty-first placement, returning windows, layout shrink, switch cancellation and last-click wins.");
     return 0;
 }

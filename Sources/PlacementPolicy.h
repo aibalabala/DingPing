@@ -17,4 +17,8 @@ uint64_t FSPlacementBeginSwitch(FSPlacementState *state);
 bool FSPlacementSwitchIsCurrent(const FSPlacementState *state, uint64_t token);
 bool FSPlacementFinishSwitch(FSPlacementState *state, uint64_t token);
 int FSPlacementChooseSlot(const FSPlacementState *state, int count, int knownSlot, unsigned occupied);
+/* reserved marks slots owned by explicitly pinned windows. The caller handles
+   a focused pinned window itself; all other automatic captures avoid them. */
+int FSPlacementChooseAvailableSlot(const FSPlacementState *state, int count, int knownSlot,
+                                   unsigned occupied, unsigned reserved);
 #endif

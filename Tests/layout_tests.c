@@ -23,7 +23,7 @@ int main(void) {
     check(FSRectNear(above,(FSRect){0,-1056,1920,1056},0));
     FSRect below=FSCocoaToAX((FSRect){0,-1080,1920,1056},900);
     check(FSRectNear(below,(FSRect){0,924,1920,1056},0));
-    int expected[]={2,3,3,4,2,1};
+    int expected[]={2,3,3,4,2,1,3,3,3,4};
     double widths[]={640,1280,1440,1512,1920,3440};
     double heights[]={480,720,982,1080,1440};
     double ratios[]={.2,.3333,.5,.667,.8};
@@ -43,6 +43,16 @@ int main(void) {
     }
     n=FSBuildZones(FSLayoutColumns3,(FSRect){0,0,1440,900},.5,0,out);
     check(n==3 && out[0].width+out[1].width+out[2].width==1440);
+    n=FSBuildZones(FSLayoutStackAndMain,(FSRect){0,0,1200,900},1.0/3.0,8,out);
+    check(n==3 && out[0].x==out[1].x && out[2].x>out[0].x);
+    check(out[2].height==out[0].height+8+out[1].height);
+    n=FSBuildZones(FSLayoutMainTopAndColumns,(FSRect){0,0,1200,900},2.0/3.0,8,out);
+    check(n==3 && out[0].y<out[1].y && out[1].y==out[2].y);
+    check(fabs(out[1].width-out[2].width)<=1);
+    n=FSBuildZones(FSLayoutRows3,(FSRect){0,0,1200,900},.5,8,out);
+    check(n==3 && out[0].y<out[1].y && out[1].y<out[2].y);
+    n=FSBuildZones(FSLayoutMainAndThree,(FSRect){0,0,1200,900},2.0/3.0,8,out);
+    check(n==4 && out[0].height==out[1].height+out[2].height+out[3].height+16);
     check(FSBuildZones(FSLayoutGrid,(FSRect){0,0,10,10},.5,8,out)==0);
     check(FSBuildZones(99,(FSRect){0,0,1000,1000},.5,8,out)==0);
     check(FSBuildZones(0,(FSRect){NAN,0,1000,1000},.5,8,out)==0);
@@ -60,6 +70,6 @@ int main(void) {
     check(FSIntersectionArea((FSRect){0,0,-500,600},primary)==0);
     check(FSIntersectionArea(primary,(FSRect){0,0,INFINITY,900})==0);
     check(FSIntersectionArea(straddling,primary)==FSIntersectionArea(primary,straddling));
-    printf("PASS: %d geometry assertions; six layouts, ratios, gaps, multi-display coordinates.\n",count);
+    printf("PASS: %d geometry assertions; ten layouts, ratios, gaps, multi-display coordinates.\n",count);
     return 0;
 }

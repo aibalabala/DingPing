@@ -2,20 +2,21 @@
 
 macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后激活的普通窗口会自动进入当前布局。选择「自由模式」即可停止自动归位与固定。它使用 macOS 辅助功能调整窗口，不调用系统的全屏 Split View。
 
-当前版本：**v0.4.0（构建 6）**。安装与授权修正版 1 保持应用源码和构建号不变，修正升级识别、同版重复签名和旧授权处理流程。
+当前版本：**v0.5.0（构建 7）**。
 
 ## 主要功能
 
-- 自由模式、左右平分、左宽右窄、三栏、左大右上下、四格、上下平分。
+- 自由模式、两栏、三栏、四格、上下两栏、三行、左右主窗加上下、上主窗加左右、左主窗加右侧三行，以及整屏等布局。
 - 点击布局立即排列并尝试将这一组窗口带到前台。
-- 窗口再次激活时回原分区；新窗口优先进入空格，满格时进入最近使用的分区。
+- 每格可勾选「固定此窗口」，为指定窗口保留位置；新窗口只进入未固定的分区。窗口关闭时固定位置仍会保留，手动取消固定后才释放。
+- 设置窗口为横向双页面，无滚动条；布局、窗口选择和固定开关直接显示在主页。
 - 可保存多套布局及窗口组合，按显示器、间距和比例调整。
-- 固定窗口位置；可选择标题栏禁止拖动。自由模式停止两种约束。
+- 自动模式维持分区位置；可选择标题栏禁止拖动。自由模式暂停这些约束，保留已保存的固定选择。
 - 不联网、不截图、不记录文字输入。具体行为和限制见[使用说明](使用说明.md)。
 
 ## 安装
 
-要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) 下载 `DingPing-v0.4.0-macOS-arm64.dmg`。打开 DMG 后双击其中的 `双击安装预编译版.command`，它会核对版本和签名、备份旧应用，安装到：
+要求 macOS 13 或更新版本。Apple Silicon 用户可从 [Releases](https://github.com/aibalabala/DingPing/releases) 下载 `DingPing-v0.5.0-macOS-arm64.dmg`。打开 DMG 后双击其中的 `双击安装预编译版.command`，它会核对版本和签名、备份旧应用，安装到：
 
 ```text
 ~/Applications/定屏.app
@@ -33,7 +34,7 @@ macOS 菜单栏窗口分屏工具。点击布局后排列当前窗口；之后�
 
 原生 Objective-C / AppKit，核心分区与拖动规则为 C；不依赖第三方运行库。主要文件在 `Sources/`，本机编译脚本在 `Scripts/build.sh`，测试在 `Tests/`。
 
-已在 Linux 上通过 60,021 条分区计算断言、拖动和自动归位规则测试、22 项安装策略与回滚模拟场景、Shell 语法和 ZIP 完整性检查。GitHub Actions 使用 macOS ARM64 runner 原生编译、运行核心测试并校验 DMG；工作流结果可在 [Actions](https://github.com/aibalabala/DingPing/actions) 查看。**实际窗口、焦点和辅助功能授权仍需在用户 Mac 上验证。**Mac 验收清单见 [Tests/MAC_ACCEPTANCE.md](Tests/MAC_ACCEPTANCE.md)。
+已在 Linux 上通过 113,277 条分区计算断言、固定位置与自动归位规则测试、22 项安装策略与回滚模拟场景、Shell 提示检查。GitHub Actions 使用 macOS ARM64 runner 原生编译、运行核心测试并校验 DMG；工作流结果可在 [Actions](https://github.com/aibalabala/DingPing/actions) 查看。**实际窗口、焦点和辅助功能授权仍需在用户 Mac 上验证。**Mac 验收清单见 [Tests/MAC_ACCEPTANCE.md](Tests/MAC_ACCEPTANCE.md)。
 
 目前采用 Mac 本地临时签名；更换应用构建后可能需要重新授予辅助功能权限。工具不会自动代替用户授予系统权限。
 

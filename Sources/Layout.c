@@ -58,6 +58,28 @@ int FSBuildZones(FSLayout kind, FSRect area, double ratio, double gap, FSRect ou
             out[0]=rect(x,y,w,top); out[1]=rect(x,y+top+gap,w,bottom); return 2;
         case FSLayoutFill:
             out[0]=rect(x,y,w,h); return 1;
+        case FSLayoutStackAndMain: {
+            double half=floor((h-gap)/2);
+            out[0]=rect(x,y,left,half);out[1]=rect(x,y+half+gap,left,h-gap-half);
+            out[2]=rect(x+left+gap,y,right,h);return 3;
+        }
+        case FSLayoutMainTopAndColumns: {
+            double half=floor((w-gap)/2);
+            out[0]=rect(x,y,w,top);
+            out[1]=rect(x,y+top+gap,half,bottom);
+            out[2]=rect(x+half+gap,y+top+gap,w-gap-half,bottom);return 3;
+        }
+        case FSLayoutRows3: {
+            double a=floor((h-2*gap)/3),b=floor((h-2*gap-a)/2);
+            out[0]=rect(x,y,w,a);out[1]=rect(x,y+a+gap,w,b);
+            out[2]=rect(x,y+a+b+2*gap,w,h-2*gap-a-b);return 3;
+        }
+        case FSLayoutMainAndThree: {
+            double a=floor((h-2*gap)/3),b=floor((h-2*gap-a)/2);
+            out[0]=rect(x,y,left,h);out[1]=rect(x+left+gap,y,right,a);
+            out[2]=rect(x+left+gap,y+a+gap,right,b);
+            out[3]=rect(x+left+gap,y+a+b+2*gap,right,h-2*gap-a-b);return 4;
+        }
         default: return 0;
     }
 }

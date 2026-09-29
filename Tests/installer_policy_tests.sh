@@ -7,8 +7,8 @@ source "$test_root/Installer/common.sh"
 test_tmp="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/DingPing.installer-tests.XXXXXX")"
 trap '/bin/rm -rf "$test_tmp"' EXIT
 DP_BUNDLE_ID=local.dingping.fixedsplit
-DP_VERSION=0.4.0
-DP_BUILD=6
+DP_VERSION=0.5.0
+DP_BUILD=7
 DP_DIGEST=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 test_count=0
 
@@ -47,7 +47,7 @@ new_case() {
   DP_SWAP_PENDING=0; DP_PRESERVE_STAGE=0
 }
 make_app() {
-  local app="$1" version="${2:-0.4.0}" build="${3:-6}" identifier="${4:-local.dingping.fixedsplit}"
+  local app="$1" version="${2:-0.5.0}" build="${3:-7}" identifier="${4:-local.dingping.fixedsplit}"
   /bin/mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   printf 'CFBundleIdentifier=%s\nCFBundleShortVersionString=%s\nCFBundleVersion=%s\nCFBundleExecutable=DingPing\n' "$identifier" "$version" "$build" > "$app/Contents/Info.plist"
   printf '#!/bin/sh\nexit 0\n' > "$app/Contents/MacOS/DingPing"
@@ -84,7 +84,7 @@ expect_failure dp_launch_current "$target_app"
 expect_no_actions
 
 new_case
-make_app "$target_app" 0.4.0 5
+make_app "$target_app" 0.5.0 6
 dp_choose_install "$target_app"
 [[ "$DP_INSTALL_ACTION" == build ]] || fail 'build must match'
 expect_failure dp_reset_current_permission "$target_app"
@@ -107,7 +107,7 @@ expect_failure dp_reset_current_permission "$target_app"
 expect_no_actions
 
 new_case
-make_app "$target_app" 0.4.0 6 example.unrelated.application
+make_app "$target_app" 0.5.0 7 example.unrelated.application
 expect_failure dp_choose_install "$target_app"
 expect_failure dp_reset_current_permission "$target_app"
 expect_no_actions
@@ -129,9 +129,9 @@ expect_failure dp_launch_current "$target_app"
 expect_no_actions
 
 new_case
-make_app "$target_app" 0.4.1 1
+make_app "$target_app" 0.5.1 1
 expect_failure dp_choose_install "$target_app"
-make_app "$target_app" 0.4.0 7
+make_app "$target_app" 0.5.0 8
 expect_failure dp_choose_install "$target_app"
 make_app "$target_app" 0.10.0 1
 expect_failure dp_choose_install "$target_app"
