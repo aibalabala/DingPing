@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.8";
+static NSString *const FSVersion=@"0.5.9";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -563,6 +563,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 }
 
 - (void)cancelActivation {
+    if([self.lastDragResult isEqual:@"已收到拖动，等待目标窗口完成移动"])
+        self.lastDragResult=@"拖动后的布局/菜单操作取消了此次换位；请松开鼠标后稍等片刻再操作菜单";
     FSPlacementCancelSwitch(&_placement);
     self.focusGeneration++;self.observedWindow=nil;
     [self clearWindowDrag];
@@ -761,13 +763,18 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSApp *app=weakSelf;
         if(app && app.dragGeneration==generation)
             [app commitWindowDrag:snapshots at:point startedAt:startPoint profile:profileID];
+        else if(app && [app.lastDragResult isEqual:@"已收到拖动，等待目标窗口完成移动"])
+            app.lastDragResult=@"拖放判定被后续操作取消；请松手后再打开菜单";
     });
 }
 - (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point
                startedAt:(CGPoint)startPoint profile:(NSString *)profileID {
     if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
        ![profileID isEqual:self.profile[@"id"]] || self.choosingWindow || self.menuOpen ||
-       self.sleeping || self.sessionInactive || NSApp.modalWindow || !AXIsProcessTrusted())return;
+       self.sleeping || self.sessionInactive || NSApp.modalWindow || !AXIsProcessTrusted()) {
+        self.lastDragResult=@"松手后模式或菜单状态改变，本次未换位；请在自动分屏模式下重新拖动";
+        return;
+    }
     FSWindow *window=nil;FSRect start={0},actual={0};BOOL pointerOnly=NO;
     for(FSDragSnapshot *snapshot in snapshots) {
         FSRect movedFrame;
@@ -927,7 +934,15 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(changed)[self saveConfig];
     [self arrangeSlot:slot manual:NO];
     [self refreshDragTargets];
-    if(![self.suspended containsIndex:slot])[self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · 自动归位；原窗口仍保持打开。",window.appName,slot+1]];
+    if(![self.suspended containsIndex:slot]) {
+        FSRect actual={0},zones[4];NSScreen *targetScreen=FSScreenWithID(self.profile[@"display"]);
+        int count=targetScreen?FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(targetScreen),
+            [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones):0;
+        BOOL arrived=slot<count && [window readFrame:&actual] && FSRectNear(actual,zones[slot],4);
+        NSString *result=[self.pending containsIndex:slot]?@"正在确认位置":
+            (arrived?@"已在目标位置":@"尚未到位，请查看权限诊断中的分区坐标");
+        [self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · %@；原窗口仍保持打开。",window.appName,slot+1,result]];
+    }
     if(self.settingsWindow.visible){self.windowChoices=FSAvailableWindows();[self refreshControls];}
 }
 - (void)seedEmptySlots {
@@ -954,7 +969,9 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         if(hiddenPin)continue;
         BOOL used=NO;for(FSWindow *other in self.runtime.allValues)if([window sameWindow:other]){used=YES;break;}
         if(used)continue;
-        for(int slot=0;slot<self.zoneCount;slot++)if(![self slotPinned:slot] && ![self.profile[@"bindings"][slot][@"bundle"] length]) {
+        /* Saved labels do not reserve an unpinned slot after their window
+           closes or changes title. Live resolved windows already occupy runtime. */
+        for(int slot=0;slot<self.zoneCount;slot++)if(![self slotPinned:slot] && !self.runtime[@(slot)]) {
             [self storeWindow:window slot:slot];break;
         }
     }
@@ -1049,7 +1066,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
             if(!ready.count)[app setMessage:app.windowChoices.count?
                 @"布局已开启，但这组窗口暂不可用。点击目标窗口使它处于前台，或在分区里重新选择窗口。":
                 @"布局已开启，但当前没有识别到可调整窗口。请点「权限诊断」查看窗口识别数量和目标显示器。"];
-            else [app setMessage:[NSString stringWithFormat:@"布局已启用 · %lu / %ld 个窗口可用，%lu 个已前置。%@",(unsigned long)ready.count,(long)app.boundCount,(unsigned long)raised,
+            else [app setMessage:[NSString stringWithFormat:@"布局已启用 · 存档 %ld、找到 %lu 个窗口，%lu 个已前置。位置仍需核对；可在「权限诊断」查看各格。%@",
+                (long)app.boundCount,(unsigned long)ready.count,(unsigned long)raised,
                 focused?@"可直接操作第一格的可用窗口。":(requested?@"系统尚未交出焦点，可直接点目标窗口。":@"不可用窗口已跳过；不会自动启动应用。")]];
         }
         [app syncDragGuard:YES];[app refreshControls];
@@ -1840,13 +1858,26 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.55*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         FSApp *app=weakSelf;if(!app || app.epoch!=epoch)return;
         [app.pending removeIndex:slot];FSRect actual;
-        if(![window readFrame:&actual])return;
-        if(FSRectNear(actual,target,4)) {app.failures[@(slot)]=@0;return;}
+        if(CGEventSourceButtonState(kCGEventSourceStateHIDSystemState,kCGMouseButtonLeft) ||
+           NSEvent.pressedMouseButtons!=0)return; /* Let the next maintenance pass retry after dragging. */
+        if(![window readFrame:&actual]) {
+            [app.suspended addIndex:slot];
+            [app setMessage:[NSString stringWithFormat:@"区域 %ld：%@ 的位置暂时无法读取；点击布局重试。",(long)slot+1,window.appName]];
+            return;
+        }
+        if(FSRectNear(actual,target,4)) {
+            app.failures[@(slot)]=@0;
+            if([app.observedWindow sameWindow:window] && [app.statusText containsString:@"正在确认位置"])
+                [app setMessage:[NSString stringWithFormat:@"%@ → 区域 %ld · 已确认到位。",window.appName,(long)slot+1]];
+            return;
+        }
         int attempts=[app.failures[@(slot)] intValue]+1;app.failures[@(slot)]=@(attempts);
-        if(attempts>=2 || manual) {
+        if(attempts>=2 || !app.locked) {
             [app.suspended addIndex:slot];
             [app refreshDragTargets];
-            [app setMessage:[NSString stringWithFormat:@"区域 %ld：%@ 未达到指定大小，可能受最小尺寸限制。此窗口已暂停自动调整，请增大分区后重试。",(long)slot+1,window.appName]];
+            [app setMessage:[NSString stringWithFormat:@"区域 %ld：%@ 未达到目标位置/尺寸（目标 %.0f,%.0f %.0f×%.0f；实际 %.0f,%.0f %.0f×%.0f）。已暂停自动调整；请检查窗口限制，或点击布局重试。",
+                (long)slot+1,window.appName,target.x,target.y,target.width,target.height,
+                actual.x,actual.y,actual.width,actual.height]];
         }
     });
     return YES;
@@ -1868,7 +1899,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     if(manual && self.suspended.count==0) {
         if(!bound)[self setMessage:self.locked?@"自动分屏已开启，打开或切换目标屏幕上的窗口即可归位。":@"当前为自由模式。点击布局开始分屏。"]; 
-        else [self setMessage:[NSString stringWithFormat:@"已处理 %d / %d 个窗口。%@",processed,bound,self.locked?@"自动归位和固定已开启；选「自由模式」可停止。":@"自由模式中可随意拖动。"]];
+        else [self setMessage:[NSString stringWithFormat:@"已向 %d / %d 个存档窗口发送调整或确认请求；正在核对实际位置。%@",processed,bound,self.locked?@"自动归位和固定已开启；选「自由模式」可停止。":@"自由模式中可随意拖动。"]];
     }
     [self refreshDragTargets];
 }
@@ -1979,18 +2010,52 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     pid_t lastPID=self.lastExternalPID;
     FSWindow *focused=trusted?FSFocusedWindow(lastPID):nil;
     NSString *focusDetail=trusted?FSFocusedWindowDiagnostic(lastPID):@"需要辅助功能授权";
-    NSString *screenState=FSScreenWithID(self.profile[@"display"])?@"已连接":@"保存的显示器未找到";
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);
+    NSString *screenState=screen?@"已连接":@"保存的显示器未找到";
+    NSUInteger availableOnTarget=0;
+    for(FSWindow *candidate in available) {
+        FSRect frame;
+        if(screen && [candidate readFrame:&frame] && FSScreenForFrame(frame)==screen)availableOnTarget++;
+    }
+    FSRect zones[4]={0};
+    int zoneCount=screen?FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(screen),
+        [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones):0;
+    NSMutableArray<NSString *> *zoneLines=[NSMutableArray new];NSUInteger resolved=0;
+    for(int i=0;i<self.zoneCount;i++) {
+        NSDictionary *binding=self.profile[@"bindings"][i];FSWindow *window=self.runtime[@(i)];
+        NSString *saved=[binding[@"app"] length]?binding[@"app"]:@"空";
+        NSString *pin=[self slotPinned:i]?@"固定":@"可补位";
+        if(!window || ![window isRestorable]) {
+            [zoneLines addObject:[NSString stringWithFormat:@"%d %@（%@）：当前没有匹配的窗口",i+1,saved,pin]];
+            continue;
+        }
+        resolved++;
+        FSRect actual={0};BOOL readable=[window readFrame:&actual];
+        NSString *state=[self.suspended containsIndex:i]?@"已暂停":
+            ([self.pending containsIndex:i]?@"等待确认":
+             (readable && i<zoneCount && FSRectNear(actual,zones[i],4)?@"已到位":
+              ([window isOnScreen:rows] || [window isFocusedInFrontmostApp]?@"未到位":@"当前桌面不可见")));
+        NSString *coordinates=readable && i<zoneCount?
+            [NSString stringWithFormat:@"目标 %.0f,%.0f %.0f×%.0f；实际 %.0f,%.0f %.0f×%.0f",
+                zones[i].x,zones[i].y,zones[i].width,zones[i].height,
+                actual.x,actual.y,actual.width,actual.height]:@"坐标不可读";
+        [zoneLines addObject:[NSString stringWithFormat:@"%d %@（%@）：%@；%@",i+1,window.appName,pin,state,coordinates]];
+    }
     NSString *dragStatus=!self.locked?@"自由模式下不换位":
         ([self.profile[@"preventDrag"] boolValue]?@"当前选择阻止标题栏拖动；改为「拖到分区换位」后再试":
          (self.lastDragResult?:@"尚无记录"));
     NSString *diagnostic=[NSString stringWithFormat:
-        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n当前模式：%@；目标显示器：%@\n窗口识别：屏幕普通窗口 %lu；可调整窗口 %lu；最近活动窗口 %@\n最近窗口检查：%@\n当前布局：已绑定 %ld；已暂停 %lu；鼠标监听 %@\n拖动规则：%@；拦截器 %@\n最近状态：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
+        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n当前模式：%@；目标显示器：%@\n窗口识别：屏幕普通窗口 %lu；可调整窗口 %lu；目标屏可用 %lu；最近活动窗口 %@\n最近窗口检查：%@\n当前布局：存档 %ld；找到 %lu；等待确认 %lu；已暂停 %lu；鼠标监听 %@\n分区实际位置：\n%@\n拖动规则：%@；拦截器 %@\n最近状态：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
         FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
         trusted?@"已授权":@"未授权",self.locked?@"自动分屏":@"自由模式",screenState,
-        (unsigned long)ordinaryRows,(unsigned long)available.count,focused?[focused label]:@"未识别",focusDetail,
-        (long)self.boundCount,(unsigned long)self.suspended.count,self.inputMonitor?@"正常":@"不可用",
+        (unsigned long)ordinaryRows,(unsigned long)available.count,(unsigned long)availableOnTarget,
+        focused?[focused label]:@"未识别",focusDetail,
+        (long)self.boundCount,(unsigned long)resolved,(unsigned long)self.pending.count,
+        (unsigned long)self.suspended.count,self.inputMonitor?@"正常":@"不可用",
+        [zoneLines componentsJoinedByString:@"\n"],
         [self.profile[@"preventDrag"] boolValue]?@"阻止拖动":@"拖放换位",
-        self.dragGuard.running?@"运行中":(self.dragGuard.faulted?@"已暂停":@"未启用"),
+        ![self.profile[@"preventDrag"] boolValue]?@"不适用":
+            (self.dragGuard.running?@"运行中":(self.dragGuard.faulted?@"已暂停":@"未启用")),
         self.statusText?:@"无",dragStatus,bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
         trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
         @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从上方显示的准确路径重新添加并开启。"];
