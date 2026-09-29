@@ -57,7 +57,7 @@ static BOOL readAXFrame(AXUIElementRef element, FSRect *frame) {
     return AXUIElementPerformAction(self.ax,kAXRaiseAction)==kAXErrorSuccess;
 }
 - (BOOL)focusWindow {
-    if(![self isUsable] || ![self isOnScreen:FSOnScreenRows()])return NO;
+    if(![self isUsable])return NO;
     NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:self.pid];
     BOOL activated=[app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
     AXUIElementRef application=AXUIElementCreateApplication(self.pid);
@@ -68,6 +68,15 @@ static BOOL readAXFrame(AXUIElementRef element, FSRect *frame) {
     CFRelease(application);
     BOOL raised=[self raiseWindow];
     return raised && (activated || front==kAXErrorSuccess);
+}
+- (BOOL)isFocusedInFrontmostApp {
+    if(NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier!=self.pid)return NO;
+    AXUIElementRef application=AXUIElementCreateApplication(self.pid);
+    AXUIElementSetMessagingTimeout(application,.5);
+    id focused=readAX(application,kAXFocusedWindowAttribute);
+    CFRelease(application);
+    return focused && CFGetTypeID((__bridge CFTypeRef)focused)==AXUIElementGetTypeID() &&
+           CFEqual((__bridge CFTypeRef)focused,(__bridge CFTypeRef)self.element);
 }
 - (BOOL)isOnScreen:(NSArray<NSDictionary *> *)rows {
     FSRect f;
@@ -155,6 +164,15 @@ NSArray<FSWindow *> *FSAvailableWindows(void) {
         }
         CFRelease(axApp);
     }
+    /* A focused ordinary window is a usable fallback if WindowServer bounds
+       cannot be paired with its AX frame on this macOS release. */
+    pid_t front=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    FSWindow *focused=FSFocusedWindow(front);
+    if(focused) {
+        BOOL known=NO;
+        for(FSWindow *window in result)if([window sameWindow:focused]){known=YES;break;}
+        if(!known)[result insertObject:focused atIndex:0];
+    }
     return result;
 }
 
@@ -183,14 +201,47 @@ FSWindow *FSFocusedWindow(pid_t pid) {
     NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:pid];
     if(!app || app.terminated)return nil;
     AXUIElementRef axApp=AXUIElementCreateApplication(pid);
-    AXUIElementSetMessagingTimeout(axApp,.18);
+    AXUIElementSetMessagingTimeout(axApp,.5);
     id focused=readAX(axApp,kAXFocusedWindowAttribute);
     CFRelease(axApp);
     if(!focused || CFGetTypeID((__bridge CFTypeRef)focused)!=AXUIElementGetTypeID())return nil;
     AXUIElementRef element=(__bridge AXUIElementRef)focused;
-    AXUIElementSetMessagingTimeout(element,.18);
+    AXUIElementSetMessagingTimeout(element,.5);
     FSWindow *w=makeWindow(element,app);
-    return w && [w isUsable] && [w isOnScreen:FSOnScreenRows()]?w:nil;
+    /* AX's focused window belongs to the active app's current UI. WindowServer
+       geometry is only a hint here; rejecting this window also disables the
+       automatic capture path when the two APIs report different bounds. */
+    return w && [w isUsable]?w:nil;
+}
+
+NSString *FSFocusedWindowDiagnostic(pid_t pid) {
+    if(pid<=0 || pid==getpid())return @"没有可检查的外部应用";
+    NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    if(!app || app.terminated)return [NSString stringWithFormat:@"PID %d 已退出",pid];
+    AXUIElementRef axApp=AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(axApp,.5);
+    CFTypeRef value=NULL;
+    AXError status=AXUIElementCopyAttributeValue(axApp,kAXFocusedWindowAttribute,&value);
+    CFRelease(axApp);
+    if(status!=kAXErrorSuccess || !value || CFGetTypeID(value)!=AXUIElementGetTypeID()) {
+        if(value)CFRelease(value);
+        return [NSString stringWithFormat:@"%@ (PID %d)：无法取得焦点窗口，AX 错误 %d",app.localizedName?:@"应用",pid,status];
+    }
+    AXUIElementRef element=(AXUIElementRef)value;
+    AXUIElementSetMessagingTimeout(element,.5);
+    FSWindow *window=makeWindow(element,app);
+    id role=readAX(element,kAXRoleAttribute),subrole=readAX(element,kAXSubroleAttribute);
+    Boolean position=false,size=false;
+    AXError positionError=AXUIElementIsAttributeSettable(element,kAXPositionAttribute,&position);
+    AXError sizeError=AXUIElementIsAttributeSettable(element,kAXSizeAttribute,&size);
+    FSRect frame={0};BOOL hasFrame=[window readFrame:&frame];
+    NSString *result=[NSString stringWithFormat:@"%@ (PID %d)：角色 %@ / %@；位置可写 %@ (%d)；尺寸可写 %@ (%d)；坐标 %@；最小化 %@；隐藏 %@",
+        app.localizedName?:@"应用",pid,role?:@"无",subrole?:@"无",
+        position?@"是":@"否",positionError,size?@"是":@"否",sizeError,
+        hasFrame?[NSString stringWithFormat:@"%.0f,%.0f %.0f×%.0f",frame.x,frame.y,frame.width,frame.height]:@"不可读",
+        [readAX(element,kAXMinimizedAttribute) boolValue]?@"是":@"否",app.hidden?@"是":@"否"];
+    CFRelease(value);
+    return result;
 }
 
 NSString *FSDisplayID(NSScreen *screen) {
@@ -267,6 +318,16 @@ FSWindow *FSWindowAtPointWithChrome(CGPoint point, FSRect *visibleFrame,
         if(hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
            CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)element))score+=1;
         if(score>bestScore){best=window;bestScore=score;}
+    }
+    if(!best) {
+        /* Some apps expose a focused AXWindow but their CG bounds cover only
+           part of that window. Permit a conservative focused-window fallback;
+           the caller still requires a top-band origin and observed movement. */
+        FSWindow *focused=FSFocusedWindow(topPID);FSRect frame;
+        double visibleArea=cgFrame.width*cgFrame.height;
+        if(focused && [focused readFrame:&frame] && visibleArea>0 &&
+           FSIntersectionArea(frame,cgFrame)/visibleArea>=.8 &&
+           fmin(frame.width,cgFrame.width)/fmax(frame.width,cgFrame.width)>=.6)best=focused;
     }
     BOOL matchedHit=hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
         best && CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)best.element);

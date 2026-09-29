@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.7";
+static NSString *const FSVersion=@"0.5.8";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -299,6 +299,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) NSView *advancedView;
 @property(nonatomic) BOOL moreExpanded;
 @property(nonatomic) BOOL lastTrusted;
+@property(nonatomic) BOOL permissionPromptShown;
 @property(nonatomic) NSTimeInterval lastWindowRefresh;
 @property(nonatomic) BOOL choosingWindow;
 @property(nonatomic) NSInteger pickingSlot;
@@ -654,7 +655,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         return;
     }
     FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=hit;snapshot.frame=frame;
-    snapshot.visibleFrame=visibleFrame;snapshot.pointerEligible=YES;
+    snapshot.visibleFrame=visibleFrame;
+    snapshot.pointerEligible=FSVisibleFrameMatch(frame,visibleFrame);
     snapshot.plainChrome=plainChrome;
     self.dragSnapshots=@[snapshot];self.dragProfileID=self.profile[@"id"];
     self.lastDragResult=@"已识别鼠标下的窗口，等待拖动";
@@ -961,7 +963,13 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)activateCurrentLayout:(BOOL)seedEmpty {
     if(![self requirePermission]){[self refreshControls];return;}
     if(!FSScreenWithID(self.profile[@"display"])) {
-        [self setMessage:@"请先选择已连接的显示器。当前模式和窗口位置未改变。"];[self refreshControls];return;
+        if(NSScreen.screens.count==1) {
+            self.profile[@"display"]=FSDisplayID(NSScreen.screens.firstObject);
+            [self setMessage:@"检测到保存的显示器标识已变化，已自动使用当前唯一的显示器。"];
+        } else {
+            [self setMessage:@"请先选择已连接的显示器。当前模式和窗口位置未改变。"];
+            [self showSettings:nil];return;
+        }
     }
     [self cancelActivation];[self resetTracking:NO];
     uint64_t token=FSPlacementBeginSwitch(&_placement);
@@ -1010,11 +1018,12 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(!AXIsProcessTrusted() || self.sleeping || self.sessionInactive || !FSScreenWithID(self.profile[@"display"])) {
         [self cancelActivation];return;
     }
-    NSArray *visible=FSOnScreenRows();
     NSMutableArray<FSWindow *> *ready=[NSMutableArray new];int firstSlot=0;
     for(int i=0;i<self.zoneCount;i++) {
         FSWindow *window=self.runtime[@(i)];
-        if(window && [window isUsable] && [window isOnScreen:visible]) {
+        FSRect frame;
+        if(window && [window isUsable] && [window readFrame:&frame] &&
+           FSScreenForFrame(frame)==FSScreenWithID(self.profile[@"display"])) {
             if(!ready.count)firstSlot=i;[ready addObject:window];
         }
     }
@@ -1035,12 +1044,14 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         app->_placement.lastSlot=firstSlot;app.observedWindow=focused?first:nil;
         app.quietUntil=NSDate.timeIntervalSinceReferenceDate+.55;
         if(focused)[app.settingsWindow orderOut:nil];
+        app.windowChoices=FSAvailableWindows();
         if(!app.suspended.count) {
-            if(!app.boundCount)[app setMessage:@"自动分屏已开启。现在打开或切换目标屏幕上的窗口，它会自动进入空闲分区。"];
+            if(!ready.count)[app setMessage:app.windowChoices.count?
+                @"布局已开启，但这组窗口暂不可用。点击目标窗口使它处于前台，或在分区里重新选择窗口。":
+                @"布局已开启，但当前没有识别到可调整窗口。请点「权限诊断」查看窗口识别数量和目标显示器。"];
             else [app setMessage:[NSString stringWithFormat:@"布局已启用 · %lu / %ld 个窗口可用，%lu 个已前置。%@",(unsigned long)ready.count,(long)app.boundCount,(unsigned long)raised,
                 focused?@"可直接操作第一格的可用窗口。":(requested?@"系统尚未交出焦点，可直接点目标窗口。":@"不可用窗口已跳过；不会自动启动应用。")]];
         }
-        app.windowChoices=FSAvailableWindows();
         [app syncDragGuard:YES];[app refreshControls];
     });
 }
@@ -1810,7 +1821,11 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (BOOL)moveSlot:(NSInteger)slot to:(FSRect)target visible:(NSArray *)visible manual:(BOOL)manual {
     if([self.pending containsIndex:slot] || (!manual && [self.suspended containsIndex:slot]))return NO;
     FSWindow *window=self.runtime[@(slot)];FSRect current;
-    if(!window || ![window isUsable] || ![window isOnScreen:visible] || ![window readFrame:&current])return NO;
+    if(!window || ![window isUsable] || ![window readFrame:&current])return NO;
+    /* Explicit layout activation can restore a saved window even when the
+       WindowServer snapshot has stale bounds. In background maintenance,
+       accept the focused window as proof of presence on the current desktop. */
+    if(!manual && ![window isOnScreen:visible] && ![window isFocusedInFrontmostApp])return NO;
     if(FSRectNear(current,target,3))return YES;
     if(self.targets[@(slot)] && !FSRectNear(fsrect(self.targets[@(slot)].rectValue),target,1))self.failures[@(slot)]=@0;
     self.targets[@(slot)]=[NSValue valueWithRect:nsrect(target)];
@@ -1912,9 +1927,17 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 }
 - (BOOL)requirePermission {
     if(AXIsProcessTrusted())return YES;
-    /* Denied operations must never launch Settings, activate our window or prompt. */
-    [self setMessage:@"当前程序未获辅助功能授权。旧版开关已开仍无效时，点「修复旧版授权」；首次授权可点「打开权限设置」。"];
+    /* Called only by an explicit user command. A new install path has a new
+       authorization decision; surface that decision instead of silently
+       leaving the old layout active. */
+    if(!self.permissionPromptShown) {
+        self.permissionPromptShown=YES;
+        NSDictionary *options=@{(__bridge NSString *)kAXTrustedCheckOptionPrompt:@YES};
+        AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+    }
+    [self setMessage:[NSString stringWithFormat:@"当前这份定屏未获辅助功能授权：%@。请在系统设置中添加此路径并开启开关。",NSBundle.mainBundle.bundlePath]];
     [self updateStatus];
+    [self showSettings:nil];
     return NO;
 }
 - (void)openPermission:(id)sender {
@@ -1949,13 +1972,26 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [self finishPicking];
     BOOL trusted=AXIsProcessTrusted();
     NSBundle *bundle=NSBundle.mainBundle;
+    NSArray *rows=FSOnScreenRows();NSUInteger ordinaryRows=0;
+    for(NSDictionary *row in rows)if([row[(__bridge NSString *)kCGWindowLayer] intValue]==0 &&
+        [row[(__bridge NSString *)kCGWindowOwnerPID] intValue]!=getpid())ordinaryRows++;
+    NSArray<FSWindow *> *available=trusted?FSAvailableWindows():@[];
+    pid_t lastPID=self.lastExternalPID;
+    FSWindow *focused=trusted?FSFocusedWindow(lastPID):nil;
+    NSString *focusDetail=trusted?FSFocusedWindowDiagnostic(lastPID):@"需要辅助功能授权";
+    NSString *screenState=FSScreenWithID(self.profile[@"display"])?@"已连接":@"保存的显示器未找到";
     NSString *dragStatus=!self.locked?@"自由模式下不换位":
         ([self.profile[@"preventDrag"] boolValue]?@"当前选择阻止标题栏拖动；改为「拖到分区换位」后再试":
          (self.lastDragResult?:@"尚无记录"));
     NSString *diagnostic=[NSString stringWithFormat:
-        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
+        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n当前模式：%@；目标显示器：%@\n窗口识别：屏幕普通窗口 %lu；可调整窗口 %lu；最近活动窗口 %@\n最近窗口检查：%@\n当前布局：已绑定 %ld；已暂停 %lu；鼠标监听 %@\n拖动规则：%@；拦截器 %@\n最近状态：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
         FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
-        trusted?@"已授权":@"未授权",dragStatus,bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
+        trusted?@"已授权":@"未授权",self.locked?@"自动分屏":@"自由模式",screenState,
+        (unsigned long)ordinaryRows,(unsigned long)available.count,focused?[focused label]:@"未识别",focusDetail,
+        (long)self.boundCount,(unsigned long)self.suspended.count,self.inputMonitor?@"正常":@"不可用",
+        [self.profile[@"preventDrag"] boolValue]?@"阻止拖动":@"拖放换位",
+        self.dragGuard.running?@"运行中":(self.dragGuard.faulted?@"已暂停":@"未启用"),
+        self.statusText?:@"无",dragStatus,bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
         trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
         @"若系统开关已经开启，可能对应旧版本或其他副本。请点「修复旧版授权」：工具会退出定屏，核对当前 App，帮助你仅移除旧定屏条目，然后从上方显示的准确路径重新添加并开启。"];
     if([bundle.bundlePath containsString:@"/AppTranslocation/"])

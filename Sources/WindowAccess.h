@@ -16,6 +16,7 @@
 - (BOOL)raiseWindow;
 - (BOOL)focusWindow;
 - (BOOL)isOnScreen:(NSArray<NSDictionary *> *)rows;
+- (BOOL)isFocusedInFrontmostApp;
 - (BOOL)moveTo:(FSRect)frame error:(NSString **)error;
 - (BOOL)sameWindow:(FSWindow *)other;
 - (NSString *)label;
@@ -26,6 +27,9 @@ NSArray<FSWindow *> *FSAvailableWindows(void);
 /* Explicit layout switches only; includes hidden/minimized ordinary windows. */
 NSArray<FSWindow *> *FSRestorableWindows(NSSet<NSString *> *bundleIDs);
 FSWindow *FSFocusedWindow(pid_t pid);
+/* Read-only details for the last external app, including the reason a focused
+   AX window was excluded from automatic placement. */
+NSString *FSFocusedWindowDiagnostic(pid_t pid);
 FSWindow *FSWindowAtPoint(CGPoint point);
 /* Match the front WindowServer row under the pointer with its AX window.
    Returns the visible frame for drag-origin geometry and a diagnostic reason. */
