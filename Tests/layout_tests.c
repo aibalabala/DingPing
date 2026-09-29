@@ -46,6 +46,13 @@ int main(void) {
     n=FSBuildZones(FSLayoutStackAndMain,(FSRect){0,0,1200,900},1.0/3.0,8,out);
     check(n==3 && out[0].x==out[1].x && out[2].x>out[0].x);
     check(out[2].height==out[0].height+8+out[1].height);
+    /* Quick presets: equal left/right halves with either side split in two. */
+    n=FSBuildZones(FSLayoutMainAndStack,(FSRect){0,0,1200,900},.5,8,out);
+    check(n==3 && fabs(out[0].width-out[1].width)<=1);
+    check(out[1].width==out[2].width && out[0].height==out[1].height+8+out[2].height);
+    n=FSBuildZones(FSLayoutStackAndMain,(FSRect){0,0,1200,900},.5,8,out);
+    check(n==3 && fabs(out[0].width-out[2].width)<=1);
+    check(out[0].width==out[1].width && out[2].height==out[0].height+8+out[1].height);
     n=FSBuildZones(FSLayoutMainTopAndColumns,(FSRect){0,0,1200,900},2.0/3.0,8,out);
     check(n==3 && out[0].y<out[1].y && out[1].y==out[2].y);
     check(fabs(out[1].width-out[2].width)<=1);

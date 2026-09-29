@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.4";
+static NSString *const FSVersion=@"0.5.5";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -23,7 +23,11 @@ static NSArray<NSDictionary *> *quickPresets(void) {
              @{@"name":@"右大左上下",@"layout":@(FSLayoutStackAndMain),@"ratio":@(1.0/3.0)},
              @{@"name":@"上大下左右",@"layout":@(FSLayoutMainTopAndColumns),@"ratio":@(2.0/3.0)},
              @{@"name":@"三行平分",@"layout":@(FSLayoutRows3),@"ratio":@.5},
-             @{@"name":@"左大右三行",@"layout":@(FSLayoutMainAndThree),@"ratio":@(2.0/3.0)}];
+             @{@"name":@"左大右三行",@"layout":@(FSLayoutMainAndThree),@"ratio":@(2.0/3.0)},
+             @{@"name":@"左半·右上下",@"layout":@(FSLayoutMainAndStack),@"ratio":@.5,
+               @"detail":@"左右各占半屏，右侧再分为上下两格"},
+             @{@"name":@"左上下·右半",@"layout":@(FSLayoutStackAndMain),@"ratio":@.5,
+               @"detail":@"左右各占半屏，左侧再分为上下两格"}];
 }
 static NSRect nsrect(FSRect r) { return NSMakeRect(r.x,r.y,r.width,r.height); }
 static FSRect fsrect(NSRect r) { return (FSRect){r.origin.x,r.origin.y,r.size.width,r.size.height}; }
@@ -1114,20 +1118,21 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [v addSubview:label(@"选择布局",NSMakeRect(26,144,155,20),14,YES)];
     NSTextField *quickHint=label(@"点一次立即排列；固定的窗口不会被新窗口替换",NSMakeRect(465,146,489,18),11,NO);
     quickHint.alignment=NSTextAlignmentRight;quickHint.textColor=NSColor.secondaryLabelColor;[v addSubview:quickHint];
-    self.freeButton=button(@"自由模式",NSMakeRect(24,166,148,52),self,@selector(unlockLayout:));
+    self.freeButton=button(@"自由模式",NSMakeRect(24,166,128,52),self,@selector(unlockLayout:));
     [self.freeButton setButtonType:NSButtonTypePushOnPushOff];self.freeButton.bezelStyle=NSBezelStyleRegularSquare;
     self.freeButton.image=[NSImage imageWithSystemSymbolName:@"macwindow" accessibilityDescription:@"不分屏"];
-    self.freeButton.imagePosition=NSImageLeft;self.freeButton.font=[NSFont systemFontOfSize:12];
+    self.freeButton.imagePosition=NSImageAbove;self.freeButton.font=[NSFont systemFontOfSize:12];
     self.freeButton.toolTip=@"不分屏、不自动归位；已保存的固定选择会保留。⌃⌥⌘0";[v addSubview:self.freeButton];
     self.presetButtons=[NSMutableArray new];
     NSInteger index=0;
     for(NSDictionary *preset in quickPresets()) {
-        NSInteger tile=index+1,row=tile/6,column=tile%6;
-        NSButton *b=button(preset[@"name"],NSMakeRect(24+156*column,166+58*row,148,52),self,@selector(presetFromButton:));
+        NSInteger tile=index+1,row=tile/7,column=tile%7;
+        NSButton *b=button(preset[@"name"],NSMakeRect(24+134*column,166+58*row,128,52),self,@selector(presetFromButton:));
         b.tag=index++;[b setButtonType:NSButtonTypePushOnPushOff];b.bezelStyle=NSBezelStyleRegularSquare;
         b.image=layoutIcon(preset);b.image.size=NSMakeSize(44,29);
-        b.imagePosition=NSImageLeft;b.font=[NSFont systemFontOfSize:11];
-        b.toolTip=[NSString stringWithFormat:@"%@：立即排列，之后激活的窗口自动归位。",preset[@"name"]];
+        b.imagePosition=NSImageAbove;b.font=[NSFont systemFontOfSize:11];
+        b.toolTip=[NSString stringWithFormat:@"%@：立即排列，之后激活的窗口自动归位。",
+                   preset[@"detail"]?:preset[@"name"]];
         [v addSubview:b];[self.presetButtons addObject:b];
     }
 
