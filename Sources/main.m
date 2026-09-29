@@ -186,7 +186,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,copy) NSString *dragProfileID;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableArray<FSAssignment *> *> *histories;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSDictionary<NSNumber *,FSWindow *> *> *runtimeCache;
-@property(nonatomic,strong) NSMutableArray<FSNewWindow *> *newWindows;
+@property(nonatomic,strong) NSMutableArray<FSNewWindow *> *createdWindowMarkers;
 @property(nonatomic) NSUInteger focusGeneration;
 @property(nonatomic) NSTimeInterval lastMaintenance;
 @property(nonatomic,strong) NSButton *freeButton;
@@ -233,7 +233,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) NSButton *rotateButton;
 @property(nonatomic,strong) NSButton *moreButton;
 @property(nonatomic,strong) NSButton *launchCheckbox;
-@property(nonatomic,strong) NSButton *newWindowCheckbox;
+@property(nonatomic,strong) NSButton *createdWindowCheckbox;
 @property(nonatomic,strong) FSFlippedView *documentView;
 @property(nonatomic,strong) NSView *advancedView;
 @property(nonatomic) BOOL moreExpanded;
@@ -372,7 +372,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)resetTracking:(BOOL)clearWindows {
     [self finishPicking];
     [self clearWindowDrag];
-    [self.newWindows removeAllObjects];
+    [self.createdWindowMarkers removeAllObjects];
     self.epoch++; [self.failures removeAllObjects]; [self.targets removeAllObjects];
     [self.suspended removeAllIndexes]; [self.pending removeAllIndexes];
     if(clearWindows)[self.runtime removeAllObjects];
@@ -384,7 +384,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.targets=[NSMutableDictionary new]; self.suspended=[NSMutableIndexSet new];
     self.pending=[NSMutableIndexSet new]; self.originals=[NSMutableArray new];
     self.histories=[NSMutableDictionary new];self.runtimeCache=[NSMutableDictionary new];
-    self.newWindows=[NSMutableArray new];
+    self.createdWindowMarkers=[NSMutableArray new];
     self.focusObserver=[FSFocusObserver new];
     self.dragGuard=[FSDragGuard new];
     __weak FSApp *weakSelf=self;
@@ -531,19 +531,19 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     FSNewWindow *created=[FSNewWindow new];created.element=element;created.pid=pid;
     created.activeSlot=active;created.parent=self.observedWindow;
     created.createdAt=NSDate.timeIntervalSinceReferenceDate;created.profileID=self.profile[@"id"];
-    [self.newWindows addObject:created];
-    if(self.newWindows.count>24)[self.newWindows removeObjectAtIndex:0];
+    [self.createdWindowMarkers addObject:created];
+    if(self.createdWindowMarkers.count>24)[self.createdWindowMarkers removeObjectAtIndex:0];
 }
 - (NSInteger)createdWindowActiveSlot:(FSWindow *)window {
     NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
     NSInteger slot=-1;
-    for(FSNewWindow *entry in [self.newWindows copy]) {
+    for(FSNewWindow *entry in [self.createdWindowMarkers copy]) {
         if(now-entry.createdAt>8 || ![entry.profileID isEqual:self.profile[@"id"]]) {
-            [self.newWindows removeObject:entry];continue;
+            [self.createdWindowMarkers removeObject:entry];continue;
         }
         if(window.pid!=entry.pid || !CFEqual((__bridge CFTypeRef)window.element,(__bridge CFTypeRef)entry.element))continue;
         if(entry.activeSlot<self.zoneCount && [entry.parent sameWindow:self.runtime[@(entry.activeSlot)]])slot=entry.activeSlot;
-        [self.newWindows removeObject:entry];break;
+        [self.createdWindowMarkers removeObject:entry];break;
     }
     return slot;
 }
@@ -1047,10 +1047,10 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [advanced addSubview:self.permissionButton];
     [advanced addSubview:button(@"权限诊断",NSMakeRect(720,292,236,32),self,@selector(showPermissionDiagnostics:))];
     [advanced addSubview:label(@"固定窗口的位置只在自动分屏时维持；自由模式保留选择，允许自由摆放。",NSMakeRect(27,324,660,22),12,NO)];
-    self.newWindowCheckbox=[NSButton checkboxWithTitle:@"新建窗口优先放入当前活动分区" target:self action:@selector(newWindowPreferenceChanged:)];
-    self.newWindowCheckbox.frame=NSMakeRect(27,355,495,26);
-    self.newWindowCheckbox.toolTip=@"新建的普通窗口会替换当前未固定分区的窗口；已有窗口仍回原位或先填空格。";
-    [advanced addSubview:self.newWindowCheckbox];
+    self.createdWindowCheckbox=[NSButton checkboxWithTitle:@"新建窗口优先放入当前活动分区" target:self action:@selector(newWindowPreferenceChanged:)];
+    self.createdWindowCheckbox.frame=NSMakeRect(27,355,495,26);
+    self.createdWindowCheckbox.toolTip=@"新建的普通窗口会替换当前未固定分区的窗口；已有窗口仍回原位或先填空格。";
+    [advanced addSubview:self.createdWindowCheckbox];
     [advanced addSubview:label(@"已固定的分区始终保留；关闭此项后，新窗口优先填空格。",NSMakeRect(510,357,448,22),11,NO)];
     self.launchCheckbox=[NSButton checkboxWithTitle:@"启动时打开设置窗口" target:self action:@selector(launchPreferenceChanged:)];
     self.launchCheckbox.frame=NSMakeRect(27,401,350,26);
@@ -1197,7 +1197,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     int kind=[p[@"layout"] intValue];
     [self.lockModePopup selectItemAtIndex:[p[@"preventDrag"] boolValue]?1:0];
-    self.newWindowCheckbox.state=[p[@"newWindowInActiveSlot"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
+    self.createdWindowCheckbox.state=[p[@"newWindowInActiveSlot"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
     for(NSButton *b in self.presetButtons)b.state=self.locked && [self matchesPreset:quickPresets()[b.tag]]?NSControlStateValueOn:NSControlStateValueOff;
     [self.layoutPopup selectItemAtIndex:kind];
     self.ratioSlider.doubleValue=[p[@"ratio"] doubleValue]*100;
