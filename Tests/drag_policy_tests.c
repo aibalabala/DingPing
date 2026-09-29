@@ -40,8 +40,20 @@ int main(void) {
     FSRect moved={-800,-400,1200,850},resized={-800,-400,800,850};
     assert(FSWindowWasDragged(w,moved));
     assert(!FSWindowWasDragged(w,resized));
+    assert(FSWindowTitleMoved(w,resized,-1300,-1060));
+    assert(!FSWindowTitleMoved(w,resized,-1420,-1060)); /* Edge resize, not title drag. */
     assert(!FSWindowWasDragged(w,(FSRect){-1435,-1080,1200,850}));
     assert(!FSWindowWasDragged(w,(FSRect){NAN,0,1200,850}));
+    /* A clear title-bar drop still expresses intent if the AX frame springs
+       back before the delayed release callback sees it. */
+    assert(FSPointerDragIntent(w,0,false,-1300,-1060,-800,-700));
+    assert(FSPointerDragIntent(w,0,true,-1300,-1030,-800,-700)); /* Confirmed taller chrome. */
+    assert(!FSPointerDragIntent(w,0,false,-1300,-1030,-800,-700));
+    assert(!FSPointerDragIntent(w,-1,true,-1300,-1060,-800,-700));
+    assert(!FSPointerDragIntent(w,0,true,-1300,-900,-800,-700));
+    assert(!FSPointerDragIntent(w,0,true,-1300,-1000,-800,-700)); /* Content/toolbar. */
+    assert(!FSPointerDragIntent(w,0,true,-1300,-1060,-1260,-1060));
+    assert(!FSPointerDragIntent(w,0,true,-1300,-1060,NAN,-700));
     FSRect zones[4]={{-1440,-1080,600,850},{-830,-1080,600,850},{0,0,1,1},{0,0,1,1}};
     assert(FSDropZoneAt(zones,2,-900,-700)==0);
     assert(FSDropZoneAt(zones,2,-800,-700)==1);
@@ -57,6 +69,6 @@ int main(void) {
     assert(FSDropChooseAction(2,0,1,1u<<1,true)==FSDropBlocked);
     assert(FSDropChooseAction(2,0,0,0,true)==FSDropIgnore);
     assert(FSDropChooseAction(2,0,-1,0,false)==FSDropIgnore);
-    puts("PASS: drag sequence pairing, passive toolbar detection, drop-point and window-center selection, pin-safe swap.");
+    puts("PASS: drag pairing, window movement, springback title intent, drop targets, pin-safe swap.");
     return 0;
 }

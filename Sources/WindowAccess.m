@@ -200,7 +200,8 @@ NSString *FSDisplayID(NSScreen *screen) {
     CFRelease(uuid); return identifier;
 }
 
-FSWindow *FSWindowAtPoint(CGPoint point) {
+FSWindow *FSWindowAtPointWithChrome(CGPoint point, BOOL *plainChrome) {
+    if(plainChrome)*plainChrome=NO;
     if(!AXIsProcessTrusted())return nil;
     AXUIElementRef system=AXUIElementCreateSystemWide(),hit=NULL;
     AXUIElementSetMessagingTimeout(system,.18);
@@ -208,7 +209,8 @@ FSWindow *FSWindowAtPoint(CGPoint point) {
     CFRelease(system);
     if(result!=kAXErrorSuccess || !hit){if(hit)CFRelease(hit);return nil;}
     AXUIElementSetMessagingTimeout(hit,.18);
-    id element=[readAX(hit,kAXRoleAttribute) isEqual:(__bridge NSString *)kAXWindowRole]?(__bridge id)hit:readAX(hit,kAXWindowAttribute);
+    id role=readAX(hit,kAXRoleAttribute);
+    id element=[role isEqual:(__bridge NSString *)kAXWindowRole]?(__bridge id)hit:readAX(hit,kAXWindowAttribute);
     FSWindow *window=nil;
     if(element && CFGetTypeID((__bridge CFTypeRef)element)==AXUIElementGetTypeID()) {
         AXUIElementRef ax=(__bridge AXUIElementRef)element;
@@ -219,9 +221,17 @@ FSWindow *FSWindowAtPoint(CGPoint point) {
             if(app.activationPolicy==NSApplicationActivationPolicyRegular)window=makeWindow(ax,app);
         }
     }
+    BOOL usable=window && [window isUsable] && [window isOnScreen:FSOnScreenRows()];
+    if(usable && plainChrome)
+        *plainChrome=[role isEqual:(__bridge NSString *)kAXWindowRole] ||
+                     [role isEqual:(__bridge NSString *)kAXToolbarRole] ||
+                     [role isEqual:(__bridge NSString *)kAXGroupRole] ||
+                     [role isEqual:(__bridge NSString *)kAXStaticTextRole];
     CFRelease(hit);
-    return window && [window isUsable] && [window isOnScreen:FSOnScreenRows()]?window:nil;
+    return usable?window:nil;
 }
+
+FSWindow *FSWindowAtPoint(CGPoint point) {return FSWindowAtPointWithChrome(point,NULL);}
 
 NSScreen *FSScreenForFrame(FSRect frame) {
     double top=NSMaxY(NSScreen.screens.firstObject.frame),bestArea=0;

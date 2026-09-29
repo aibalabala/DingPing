@@ -8,7 +8,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.5.5";
+static NSString *const FSVersion=@"0.5.6";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -189,6 +189,10 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @interface FSDragSnapshot : NSObject
 @property(nonatomic,strong) FSWindow *window;
 @property(nonatomic) FSRect frame;
+@property(nonatomic) FSRect movedFrame;
+@property(nonatomic) BOOL movedDuringDrag;
+@property(nonatomic) BOOL pointerEligible;
+@property(nonatomic) BOOL plainChrome;
 @end
 @implementation FSDragSnapshot @end
 
@@ -235,6 +239,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) NSPanel *dragOverlay;
 @property(nonatomic,strong) FSDragOverlayView *dragOverlayView;
 @property(nonatomic) BOOL dragMotionSeen;
+@property(nonatomic) CGPoint dragStartPoint;
 @property(nonatomic,copy) NSString *dragProfileID;
 @property(nonatomic) NSUInteger dragGeneration;
 @property(nonatomic) NSTimeInterval lastDragOverlayUpdate;
@@ -323,7 +328,8 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)beginWindowDrag:(NSEvent *)event;
 - (void)updateDragOverlay:(NSEvent *)event;
 - (void)finishWindowDrag:(NSEvent *)event;
-- (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point profile:(NSString *)profileID;
+- (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point
+               startedAt:(CGPoint)startPoint profile:(NSString *)profileID;
 - (void)clearWindowDrag;
 - (void)noteCreatedWindow:(id)element pid:(pid_t)pid;
 - (NSInteger)createdWindowActiveSlot:(FSWindow *)window;
@@ -608,6 +614,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)clearWindowDrag {
     [self.dragOverlay orderOut:nil];
     self.dragSnapshots=nil;self.dragProfileID=nil;self.dragMotionSeen=NO;
+    self.dragStartPoint=CGPointZero;
     self.lastDragOverlayUpdate=0;
     self.dragGeneration++;
 }
@@ -618,26 +625,43 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
        self.choosingWindow || self.menuOpen || self.sleeping || self.sessionInactive ||
        NSApp.modalWindow || !AXIsProcessTrusted() || !FSScreenWithID(self.profile[@"display"]))return;
     CGPoint point=mouseAXPoint(event);
+    self.dragStartPoint=point;
     NSMutableArray<FSDragSnapshot *> *snapshots=[NSMutableArray new];
-    FSWindow *hit=FSWindowAtPoint(point);FSRect frame;
+    NSArray *visible=FSOnScreenRows();
+    pid_t topPID=0;FSRect topFrame={0};
+    /* AX hit testing can miss a toolbar child. The frontmost regular window
+       under the pointer still identifies which managed window was grabbed. */
+    for(NSDictionary *row in visible) {
+        if([row[(__bridge NSString *)kCGWindowLayer] intValue]!=0)continue;
+        CGRect bounds;NSDictionary *value=row[(__bridge NSString *)kCGWindowBounds];
+        if(!value || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)value,&bounds) ||
+           !CGRectContainsPoint(bounds,point))continue;
+        topPID=[row[(__bridge NSString *)kCGWindowOwnerPID] intValue];
+        topFrame=(FSRect){bounds.origin.x,bounds.origin.y,bounds.size.width,bounds.size.height};
+        break;
+    }
+    BOOL plainChrome=NO;
+    FSWindow *hit=FSWindowAtPointWithChrome(point,&plainChrome);FSRect frame;
     if(!hit) {
         pid_t pid=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
         hit=FSFocusedWindow(pid);
     }
     if(hit && [hit readFrame:&frame] && FSPassiveDragCandidate(frame,point.x,point.y)) {
         FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=hit;snapshot.frame=frame;
+        snapshot.pointerEligible=topPID==hit.pid && FSRectNear(frame,topFrame,3);
+        snapshot.plainChrome=plainChrome;
         [snapshots addObject:snapshot];
     }
     /* AX hit testing can return only a toolbar child or no window at all.
        Track managed windows under the pointer; only the one that really moves
        can be used when the mouse is released. */
-    NSArray *visible=FSOnScreenRows();
     for(int i=0;i<self.zoneCount;i++) {
         FSWindow *window=self.runtime[@(i)];BOOL known=NO;
         for(FSDragSnapshot *snapshot in snapshots)if([window sameWindow:snapshot.window]){known=YES;break;}
         if(known || !window || ![window isUsable] || ![window isOnScreen:visible] ||
            ![window readFrame:&frame] || !FSPassiveDragCandidate(frame,point.x,point.y))continue;
         FSDragSnapshot *snapshot=[FSDragSnapshot new];snapshot.window=window;snapshot.frame=frame;
+        snapshot.pointerEligible=topPID==window.pid && FSRectNear(frame,topFrame,3);
         [snapshots addObject:snapshot];
     }
     self.dragSnapshots=snapshots;self.dragProfileID=snapshots.count?self.profile[@"id"]:nil;
@@ -649,11 +673,33 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
     if(now-self.lastDragOverlayUpdate<.08)return;
     self.lastDragOverlayUpdate=now;
-    FSWindow *moving=nil;FSRect actual;
+    FSWindow *moving=nil;FSRect actual={0};
     for(FSDragSnapshot *snapshot in self.dragSnapshots) {
         FSRect frame;
-        if([snapshot.window readFrame:&frame] && FSWindowWasDragged(snapshot.frame,frame)) {
+        if([snapshot.window readFrame:&frame] &&
+           (FSWindowWasDragged(snapshot.frame,frame) ||
+            FSWindowTitleMoved(snapshot.frame,frame,self.dragStartPoint.x,self.dragStartPoint.y))) {
+            snapshot.movedDuringDrag=YES;snapshot.movedFrame=frame;
             moving=snapshot.window;actual=frame;break;
+        }
+    }
+    if(!moving)for(FSDragSnapshot *snapshot in self.dragSnapshots)if(snapshot.movedDuringDrag) {
+        moving=snapshot.window;actual=snapshot.movedFrame;break;
+    }
+    CGPoint point=mouseAXPoint(event);
+    /* The AX frame can lag a real title-bar gesture. A managed source can
+       still show the destination once the pointer has travelled far enough. */
+    if(!moving)for(FSDragSnapshot *snapshot in self.dragSnapshots) {
+        BOOL managed=NO;
+        for(int i=0;i<self.zoneCount;i++)if([snapshot.window sameWindow:self.runtime[@(i)]]){managed=YES;break;}
+        if(managed && snapshot.pointerEligible &&
+           FSPointerDragIntent(snapshot.frame,0,snapshot.plainChrome,
+                                          self.dragStartPoint.x,self.dragStartPoint.y,
+                                          point.x,point.y)) {
+            moving=snapshot.window;actual=snapshot.frame;
+            actual.x+=point.x-self.dragStartPoint.x;
+            actual.y+=point.y-self.dragStartPoint.y;
+            break;
         }
     }
     if(!moving){[self.dragOverlay orderOut:nil];return;}
@@ -672,7 +718,6 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         sourcePinned=(hidden && [moving sameWindow:hidden]) ||
             (!hidden && [moving.bundleID isEqual:binding[@"bundle"]] && [moving.title isEqual:binding[@"title"]]);
     }
-    CGPoint point=mouseAXPoint(event);
     int target=FSDropDestination(zones,count,source,point.x,point.y,actual);
     NSRect frame=screen.visibleFrame;
     if(!self.dragOverlay) {
@@ -703,6 +748,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSArray<FSDragSnapshot *> *snapshots=self.dragSnapshots;
     BOOL moved=self.dragMotionSeen;
     NSString *profileID=self.dragProfileID;
+    CGPoint startPoint=self.dragStartPoint;
     [self clearWindowDrag];
     if(!snapshots.count || !moved || !self.locked || _placement.switching ||
        [self.profile[@"preventDrag"] boolValue] || ![profileID isEqual:self.profile[@"id"]] ||
@@ -718,22 +764,44 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
        the move before reading its accessibility frame and reassigning zones. */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.12*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         FSApp *app=weakSelf;
-        if(app && app.dragGeneration==generation)[app commitWindowDrag:snapshots at:point profile:profileID];
+        if(app && app.dragGeneration==generation)
+            [app commitWindowDrag:snapshots at:point startedAt:startPoint profile:profileID];
     });
 }
-- (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point profile:(NSString *)profileID {
+- (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point
+               startedAt:(CGPoint)startPoint profile:(NSString *)profileID {
     if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
        ![profileID isEqual:self.profile[@"id"]] || self.choosingWindow || self.menuOpen ||
        self.sleeping || self.sessionInactive || NSApp.modalWindow || !AXIsProcessTrusted())return;
-    FSWindow *window=nil;FSRect start={0},actual={0};
+    FSWindow *window=nil;FSRect start={0},actual={0};BOOL pointerOnly=NO;
     for(FSDragSnapshot *snapshot in snapshots) {
         FSRect movedFrame;
         if([snapshot.window isUsable] && [snapshot.window readFrame:&movedFrame] &&
-           FSWindowWasDragged(snapshot.frame,movedFrame)) {
+           (FSWindowWasDragged(snapshot.frame,movedFrame) ||
+            FSWindowTitleMoved(snapshot.frame,movedFrame,startPoint.x,startPoint.y))) {
             window=snapshot.window;start=snapshot.frame;actual=movedFrame;break;
         }
     }
-    if(!window){self.lastDragResult=@"收到鼠标拖动，但窗口位置没有变化；请拖动标题栏空白处";return;}
+    if(!window)for(FSDragSnapshot *snapshot in snapshots)if(snapshot.movedDuringDrag &&
+       [snapshot.window isUsable]) {
+        FSRect current;
+        if([snapshot.window readFrame:&current]) {
+            window=snapshot.window;start=snapshot.frame;actual=snapshot.movedFrame;break;
+        }
+    }
+    if(!window)for(FSDragSnapshot *snapshot in snapshots) {
+        NSInteger source=-1;
+        for(int i=0;i<self.zoneCount;i++)if([snapshot.window sameWindow:self.runtime[@(i)]]){source=i;break;}
+        if(!snapshot.pointerEligible ||
+           !FSPointerDragIntent(snapshot.frame,(int)source,snapshot.plainChrome,
+                                startPoint.x,startPoint.y,point.x,point.y) ||
+           ![snapshot.window isUsable])continue;
+        FSRect current;if(![snapshot.window readFrame:&current])continue;
+        window=snapshot.window;start=snapshot.frame;actual=snapshot.frame;
+        actual.x+=point.x-startPoint.x;actual.y+=point.y-startPoint.y;
+        pointerOnly=YES;break;
+    }
+    if(!window){self.lastDragResult=@"未确认标题栏拖放：窗口未移动，或起点不在标题栏";return;}
     NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
     FSRect zones[4];int count=FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(screen),
                                           [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones);
@@ -791,7 +859,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         return;
     }
     NSString *detail=action==FSDropSwap?@"已与原窗口交换":action==FSDropReplace?@"原窗口仍保持打开":@"已移动";
-    self.lastDragResult=[NSString stringWithFormat:@"已换到区域 %d",destination+1];
+    self.lastDragResult=[NSString stringWithFormat:@"已换到区域 %d（%@）",destination+1,
+                         pointerOnly?@"标题栏落点":@"窗口位移"];
     [self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · %@。",window.appName,destination+1,detail]];
 }
 - (void)scheduleAutomaticPlacement {

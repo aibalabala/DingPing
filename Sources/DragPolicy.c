@@ -43,6 +43,26 @@ bool FSWindowWasDragged(FSRect before, FSRect after) {
            hypot(after.x-before.x,after.y-before.y)>=12;
 }
 
+bool FSWindowTitleMoved(FSRect before,FSRect after,double downX,double downY) {
+    return FSTitleCandidate(before,downX,downY) &&
+           isfinite(after.x) && isfinite(after.y) &&
+           isfinite(after.width) && isfinite(after.height) &&
+           after.width>0 && after.height>0 &&
+           hypot(after.x-before.x,after.y-before.y)>=12;
+}
+
+bool FSPointerDragIntent(FSRect sourceWindow,int source,bool plainChrome,
+                         double downX,double downY,double upX,double upY) {
+    /* The drop-only band includes current macOS title bars up to 56 points.
+       The active mouse blocker remains narrower because it consumes clicks. */
+    bool topBand=FSTitleCandidate(sourceWindow,downX,downY) ||
+                 (plainChrome && FSPassiveDragCandidate(sourceWindow,downX,downY) &&
+                 downX>=sourceWindow.x+80 && downX<sourceWindow.x+sourceWindow.width-20 &&
+                 downY<sourceWindow.y+56);
+    return source>=0 && topBand &&
+           isfinite(upX) && isfinite(upY) && hypot(upX-downX,upY-downY)>=80;
+}
+
 int FSDropZoneAt(const FSRect zones[4],int count,double x,double y) {
     if(!zones || count<1 || count>4 || !isfinite(x) || !isfinite(y))return -1;
     for(int i=0;i<count;i++) {

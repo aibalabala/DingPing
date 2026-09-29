@@ -16,6 +16,13 @@ bool FSPassiveDragCandidate(FSRect window, double x, double y);
 typedef enum { FSDropIgnore, FSDropBlocked, FSDropMove, FSDropSwap, FSDropReplace } FSDropAction;
 /* A genuine title-bar translation can change assignments; resizing cannot. */
 bool FSWindowWasDragged(FSRect before, FSRect after);
+/* macOS may resize a window while moving it; this remains a drag when the
+   gesture began in the interior of the title bar. */
+bool FSWindowTitleMoved(FSRect before,FSRect after,double downX,double downY);
+/* A managed window can be assigned by a deliberate title-bar drop even if the
+   target app restores its frame before accessibility reports the final move. */
+bool FSPointerDragIntent(FSRect sourceWindow,int source,bool plainChrome,
+                         double downX,double downY,double upX,double upY);
 int FSDropZoneAt(const FSRect zones[4], int count, double x, double y);
 /* A window moved into another zone can be dropped while its grab point remains
    inside the old zone; a drop outside all zones still cancels reassignment. */

@@ -27,6 +27,9 @@ NSArray<FSWindow *> *FSAvailableWindows(void);
 NSArray<FSWindow *> *FSRestorableWindows(NSSet<NSString *> *bundleIDs);
 FSWindow *FSFocusedWindow(pid_t pid);
 FSWindow *FSWindowAtPoint(CGPoint point);
+/* Indicates a non-control title/toolbar surface; editable fields and buttons
+   must not be interpreted as pointer-only window dragging. */
+FSWindow *FSWindowAtPointWithChrome(CGPoint point, BOOL *plainChrome);
 NSScreen *FSScreenForFrame(FSRect frame);
 NSString *FSDisplayID(NSScreen *screen);
 NSScreen *FSScreenWithID(NSString *identifier);
