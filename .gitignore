@@ -1,0 +1,19 @@
+# Local build, App and user state
+*.app/
+*.dSYM/
+*.o
+*.log
+*.zip
+build/
+DerivedData/
+.DS_Store
+__pycache__/
+*.pyc
+*.xcuserstate
+
+# Diagnostics and logs generated on a user's Mac
+定屏诊断结果.txt
+安装日志.txt
+权限修复日志.txt
+升级修复日志.txt
+已安装版本.txt

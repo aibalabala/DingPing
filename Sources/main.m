@@ -1,0 +1,1467 @@
+#import <Cocoa/Cocoa.h>
+#import <Carbon/Carbon.h>
+#import "WindowAccess.h"
+#import "DragGuard.h"
+#import "FocusObserver.h"
+#include "PlacementPolicy.h"
+#include <math.h>
+#include <unistd.h>
+
+static NSString *const FSVersion=@"0.4.0";
+static NSArray<NSString *> *layoutNames(void) {
+    return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域"];
+}
+static NSArray<NSDictionary *> *quickPresets(void) {
+    return @[@{@"name":@"左右平分",@"layout":@0,@"ratio":@.5},
+             @{@"name":@"左宽右窄",@"layout":@0,@"ratio":@(2.0/3.0)},
+             @{@"name":@"三栏平分",@"layout":@1,@"ratio":@.5},
+             @{@"name":@"左大右上下",@"layout":@2,@"ratio":@(2.0/3.0)},
+             @{@"name":@"四格平分",@"layout":@3,@"ratio":@.5},
+             @{@"name":@"上下平分",@"layout":@4,@"ratio":@.5}];
+}
+static NSRect nsrect(FSRect r) { return NSMakeRect(r.x,r.y,r.width,r.height); }
+static FSRect fsrect(NSRect r) { return (FSRect){r.origin.x,r.origin.y,r.size.width,r.size.height}; }
+static NSTextField *label(NSString *text, NSRect frame, CGFloat size, BOOL bold) {
+    NSTextField *v=[NSTextField labelWithString:text];
+    v.frame=frame; v.font=bold?[NSFont systemFontOfSize:size weight:NSFontWeightSemibold]:[NSFont systemFontOfSize:size];
+    v.lineBreakMode=NSLineBreakByTruncatingTail;
+    return v;
+}
+static NSButton *button(NSString *title, NSRect frame, id target, SEL action) {
+    NSButton *v=[NSButton buttonWithTitle:title target:target action:action];
+    v.frame=frame; v.bezelStyle=NSBezelStyleRounded; return v;
+}
+
+static NSArray<NSString *> *positionNames(FSLayout layout) {
+    switch(layout) {
+        case FSLayoutColumns2:return @[@"左",@"右"];
+        case FSLayoutColumns3:return @[@"左",@"中",@"右"];
+        case FSLayoutMainAndStack:return @[@"左侧主窗",@"右上",@"右下"];
+        case FSLayoutGrid:return @[@"左上",@"右上",@"左下",@"右下"];
+        case FSLayoutRows2:return @[@"上",@"下"];
+        case FSLayoutFill:return @[@"整屏"];
+        default:return @[];
+    }
+}
+static NSImage *layoutIcon(NSDictionary *preset) {
+    NSImage *icon=[[NSImage alloc] initWithSize:NSMakeSize(72,44)];
+    [icon lockFocus];[NSColor.labelColor setFill];
+    FSRect zones[4];int n=FSBuildZones([preset[@"layout"] intValue],(FSRect){0,0,72,44},[preset[@"ratio"] doubleValue],3,zones);
+    for(int i=0;i<n;i++) {
+        FSRect r=zones[i];NSRect f=NSMakeRect(r.x,44-r.y-r.height,r.width,r.height);
+        [[NSBezierPath bezierPathWithRoundedRect:f xRadius:2 yRadius:2] fill];
+    }
+    [icon unlockFocus];icon.template=YES;return icon;
+}
+
+@interface FSFlippedView : NSView @end
+@implementation FSFlippedView
+- (BOOL)isFlipped {return YES;}
+@end
+@interface FSCard : FSFlippedView @end
+@implementation FSCard
+- (void)drawRect:(NSRect)dirtyRect {
+    [NSColor.controlBackgroundColor setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:12 yRadius:12] fill];
+}
+@end
+
+@interface FSPreview : NSView
+@property(nonatomic) FSLayout layout;
+@property(nonatomic) double ratio;
+@property(nonatomic) double gap;
+@property(nonatomic) double aspect;
+@property(nonatomic,copy) NSArray<NSString *> *names;
+@property(nonatomic) BOOL freeMode;
+@property(nonatomic) NSInteger activeSlot;
+@property(nonatomic,copy) void (^onSelectSlot)(NSInteger slot);
+@end
+@implementation FSPreview
+- (BOOL)isFlipped { return YES; }
+- (int)buildPreviewZones:(FSRect *)zones {
+    NSRect outer=NSInsetRect(self.bounds,12,12);
+    double aspect=self.aspect>0?self.aspect:16.0/9.0;
+    double width=outer.size.width,height=width/aspect;
+    if(height>outer.size.height) {height=outer.size.height;width=height*aspect;}
+    FSRect area={outer.origin.x+(outer.size.width-width)/2,outer.origin.y+(outer.size.height-height)/2,width,height};
+    return FSBuildZones(self.layout,area,self.ratio,5,zones);
+}
+- (void)mouseDown:(NSEvent *)event {
+    if(self.freeMode)return;
+    NSPoint point=[self convertPoint:event.locationInWindow fromView:nil];
+    FSRect zones[4];int n=[self buildPreviewZones:zones];
+    for(int i=0;i<n;i++)if(NSPointInRect(point,nsrect(zones[i])) && self.onSelectSlot){self.onSelectSlot(i);break;}
+}
+- (void)resetCursorRects {[self addCursorRect:self.bounds cursor:NSCursor.pointingHandCursor];}
+- (void)drawRect:(NSRect)dirtyRect {
+    [[NSColor controlBackgroundColor] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:12 yRadius:12] fill];
+    if(self.freeMode) {
+        NSMutableParagraphStyle *style=[NSMutableParagraphStyle new];style.alignment=NSTextAlignmentCenter;
+        [@"自由模式\n窗口按你自己的方式摆放" drawInRect:NSInsetRect(self.bounds,20,48)
+            withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:15],NSForegroundColorAttributeName:NSColor.secondaryLabelColor,NSParagraphStyleAttributeName:style}];
+        return;
+    }
+    FSRect zones[4];int n=[self buildPreviewZones:zones];
+    NSArray *colors=@[NSColor.systemBlueColor,NSColor.systemTealColor,NSColor.systemPurpleColor,NSColor.systemOrangeColor];
+    for(int i=0;i<n;i++) {
+        NSRect r=nsrect(zones[i]);
+        [colors[i] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:r xRadius:7 yRadius:7] fill];
+        if(i==self.activeSlot) {
+            [NSColor.labelColor setStroke];NSBezierPath *border=[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r,2,2) xRadius:6 yRadius:6];
+            border.lineWidth=3;[border stroke];
+        }
+        NSString *name=((NSUInteger)i<self.names.count && self.names[i].length)?self.names[i]:@"空闲分区";
+        NSMutableParagraphStyle *style=[NSMutableParagraphStyle new];
+        style.alignment=NSTextAlignmentCenter; style.lineBreakMode=NSLineBreakByTruncatingTail;
+        NSDictionary *a=@{NSFontAttributeName:[NSFont systemFontOfSize:25 weight:NSFontWeightSemibold],
+                           NSForegroundColorAttributeName:NSColor.whiteColor,NSParagraphStyleAttributeName:style};
+        [[NSString stringWithFormat:@"%d",i+1] drawInRect:NSMakeRect(r.origin.x+3,NSMidY(r)-28,r.size.width-6,32) withAttributes:a];
+        a=@{NSFontAttributeName:[NSFont systemFontOfSize:11 weight:NSFontWeightMedium],
+            NSForegroundColorAttributeName:NSColor.whiteColor,NSParagraphStyleAttributeName:style};
+        [name drawInRect:NSMakeRect(r.origin.x+6,NSMidY(r)+8,r.size.width-12,18) withAttributes:a];
+    }
+}
+@end
+
+@interface FSRestore : NSObject
+@property(nonatomic,strong) FSWindow *window;
+@property(nonatomic) FSRect frame;
+@end
+@implementation FSRestore @end
+
+@interface FSAssignment : NSObject
+@property(nonatomic,strong) FSWindow *window;
+@property(nonatomic) NSInteger slot;
+@end
+@implementation FSAssignment @end
+
+@interface FSApp : NSObject<NSApplicationDelegate,NSMenuDelegate,NSWindowDelegate> {
+    EventHotKeyRef _hotKeys[15];
+    EventHandlerRef _hotHandler;
+    FSPlacementState _placement;
+}
+@property(nonatomic,strong) NSStatusItem *statusItem;
+@property(nonatomic,strong) NSWindow *settingsWindow;
+@property(nonatomic,strong) NSMutableDictionary *config;
+@property(nonatomic,strong) NSURL *configURL;
+@property(nonatomic,strong) NSMutableDictionary<NSNumber *,FSWindow *> *runtime;
+@property(nonatomic,strong) NSMutableDictionary<NSNumber *,NSNumber *> *failures;
+@property(nonatomic,strong) NSMutableDictionary<NSNumber *,NSValue *> *targets;
+@property(nonatomic,strong) NSMutableIndexSet *suspended;
+@property(nonatomic,strong) NSMutableIndexSet *pending;
+@property(nonatomic,strong) NSMutableArray<FSRestore *> *originals;
+@property(nonatomic,strong) NSArray<FSWindow *> *windowChoices;
+@property(nonatomic,strong) NSTimer *timer;
+@property(nonatomic,strong) id activity;
+@property(nonatomic,strong) FSDragGuard *dragGuard;
+@property(nonatomic,strong) FSFocusObserver *focusObserver;
+@property(nonatomic,strong) id inputMonitor;
+@property(nonatomic,strong) id localInputMonitor;
+@property(nonatomic,strong) FSWindow *observedWindow;
+@property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableArray<FSAssignment *> *> *histories;
+@property(nonatomic,strong) NSMutableDictionary<NSString *,NSDictionary<NSNumber *,FSWindow *> *> *runtimeCache;
+@property(nonatomic) NSUInteger focusGeneration;
+@property(nonatomic) NSTimeInterval lastMaintenance;
+@property(nonatomic,strong) NSButton *freeButton;
+@property(nonatomic) BOOL locked;
+@property(nonatomic) BOOL sleeping;
+@property(nonatomic) BOOL sessionInactive;
+@property(nonatomic) BOOL menuOpen;
+@property(nonatomic) BOOL refreshing;
+@property(nonatomic) BOOL saveBlocked;
+@property(nonatomic) NSUInteger epoch;
+@property(nonatomic) pid_t lastExternalPID;
+@property(nonatomic) NSTimeInterval lastMouseDown;
+@property(nonatomic) NSTimeInterval quietUntil;
+@property(nonatomic) NSTimeInterval lastResolve;
+@property(nonatomic,copy) NSString *statusText;
+@property(nonatomic,copy) NSString *hotkeyWarning;
+@property(nonatomic,strong) NSValue *lastUsable;
+@property(nonatomic,strong) NSTextField *permissionLabel;
+@property(nonatomic,strong) NSTextField *statusLabel;
+@property(nonatomic,strong) NSTextField *ratioLabel;
+@property(nonatomic,strong) NSTextField *gapLabel;
+@property(nonatomic,strong) NSButton *permissionButton;
+@property(nonatomic,strong) NSButton *lockButton;
+@property(nonatomic,strong) NSButton *restoreButton;
+@property(nonatomic,strong) NSPopUpButton *lockModePopup;
+@property(nonatomic,strong) NSTextField *guardStatusLabel;
+@property(nonatomic,strong) NSMutableArray<NSButton *> *presetButtons;
+@property(nonatomic,strong) NSPopUpButton *profilePopup;
+@property(nonatomic,strong) NSPopUpButton *screenPopup;
+@property(nonatomic,strong) NSPopUpButton *layoutPopup;
+@property(nonatomic,strong) NSSlider *ratioSlider;
+@property(nonatomic,strong) NSSlider *gapSlider;
+@property(nonatomic,strong) FSPreview *preview;
+@property(nonatomic,strong) NSMutableArray<NSPopUpButton *> *bindingPopups;
+@property(nonatomic,strong) NSMutableArray<NSTextField *> *bindingLabels;
+@property(nonatomic,strong) NSMutableArray<NSButton *> *pickButtons;
+@property(nonatomic,strong) NSTextField *guideTitle;
+@property(nonatomic,strong) NSTextField *guideDetail;
+@property(nonatomic,strong) NSTextField *stateLabel;
+@property(nonatomic,strong) NSButton *guideButton;
+@property(nonatomic,strong) NSButton *fillButton;
+@property(nonatomic,strong) NSButton *rotateButton;
+@property(nonatomic,strong) NSButton *moreButton;
+@property(nonatomic,strong) NSButton *launchCheckbox;
+@property(nonatomic,strong) FSFlippedView *documentView;
+@property(nonatomic,strong) NSView *advancedView;
+@property(nonatomic,strong) NSScrollView *scrollView;
+@property(nonatomic) BOOL moreExpanded;
+@property(nonatomic) BOOL lastTrusted;
+@property(nonatomic) NSTimeInterval lastWindowRefresh;
+@property(nonatomic) BOOL choosingWindow;
+@property(nonatomic) NSInteger pickingSlot;
+@property(nonatomic) NSUInteger pickingGeneration;
+@property(nonatomic) NSTimeInterval pickingDeadline;
+@property(nonatomic,strong) id pickMonitor;
+- (void)handleHotKey:(UInt32)identifier;
+- (BOOL)matchesPreset:(NSDictionary *)preset;
+- (void)activatePreset:(NSInteger)index;
+- (void)syncDragGuard:(BOOL)retry;
+- (void)refreshDragTargets;
+- (BOOL)requirePermission;
+- (NSInteger)boundCount;
+- (void)resolveBindings:(BOOL)force available:(NSArray<FSWindow *> *)available;
+- (void)resolveBindings:(BOOL)force;
+- (void)finishPicking;
+- (void)fixLayout:(id)sender;
+- (void)unlockLayout:(id)sender;
+- (void)scheduleAutomaticPlacement;
+- (void)captureActiveWindow;
+- (void)activateCurrentLayout:(BOOL)seedEmpty;
+- (void)finishActivation:(uint64_t)token attempt:(NSInteger)attempt;
+- (void)foregroundLayout:(uint64_t)token;
+- (void)seedEmptySlots;
+- (void)cancelActivation;
+- (void)rememberAssignment:(FSWindow *)window slot:(NSInteger)slot;
+- (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot;
+@end
+
+static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
+    EventHotKeyID identifier;
+    OSStatus err=GetEventParameter(event,kEventParamDirectObject,typeEventHotKeyID,NULL,sizeof(identifier),NULL,&identifier);
+    if(err!=noErr || identifier.signature!='FSpl')return eventNotHandledErr;
+    [(__bridge FSApp *)context handleHotKey:identifier.id]; return noErr;
+}
+
+@implementation FSApp
+
+- (BOOL)locked {return _placement.enabled;}
+- (void)setLocked:(BOOL)enabled {
+    if(_placement.enabled!=enabled)FSPlacementSetEnabled(&_placement,enabled);
+}
+
+- (NSMutableDictionary *)newProfile:(NSString *)name {
+    NSString *display=NSScreen.screens.count?FSDisplayID(NSScreen.mainScreen?:NSScreen.screens.firstObject):@"";
+    return [@{@"id":NSUUID.UUID.UUIDString,@"name":name,@"display":display,@"layout":@0,
+              @"ratio":@.5,@"gap":@8,@"preventDrag":@NO,@"bindings":[NSMutableArray arrayWithObjects:@{},@{},@{},@{},nil]} mutableCopy];
+}
+- (NSMutableDictionary *)profile {
+    for(NSMutableDictionary *p in self.config[@"profiles"])if([p[@"id"] isEqual:self.config[@"active"]])return p;
+    return [self.config[@"profiles"] firstObject];
+}
+- (int)zoneCount {
+    FSRect z[4]; return FSBuildZones([self.profile[@"layout"] intValue],(FSRect){0,0,1000,700},.5,8,z);
+}
+- (void)loadConfig {
+    NSURL *directory=[[[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject URLByAppendingPathComponent:@"定屏" isDirectory:YES];
+    self.configURL=[directory URLByAppendingPathComponent:@"layouts.json"];
+    NSData *data=[NSData dataWithContentsOfURL:self.configURL];
+    id loaded=data?[NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil]:nil;
+    BOOL valid=[loaded isKindOfClass:NSDictionary.class] && ([loaded[@"version"] isEqual:@1] || [loaded[@"version"] isEqual:@2]) &&
+               [loaded[@"profiles"] isKindOfClass:NSArray.class] && [loaded[@"profiles"] count]>0;
+    NSMutableArray *profiles=[NSMutableArray new];
+    if(valid) for(id candidate in loaded[@"profiles"]) {
+        if(![candidate isKindOfClass:NSDictionary.class] || ![candidate[@"id"] isKindOfClass:NSString.class] ||
+           ![candidate[@"name"] isKindOfClass:NSString.class] || ![candidate[@"display"] isKindOfClass:NSString.class] ||
+           ![candidate[@"layout"] isKindOfClass:NSNumber.class] || ![candidate[@"ratio"] isKindOfClass:NSNumber.class] ||
+           ![candidate[@"gap"] isKindOfClass:NSNumber.class] || ![candidate[@"bindings"] isKindOfClass:NSArray.class]) {valid=NO;break;}
+        int layout=[candidate[@"layout"] intValue];
+        if(layout<0 || layout>=FSLayoutCount) {valid=NO;break;}
+        NSMutableDictionary *p=[candidate mutableCopy];
+        p[@"preventDrag"]=@([p[@"preventDrag"] isEqual:@YES]);
+        p[@"ratio"]=@(fmin(.8,fmax(.2,[p[@"ratio"] doubleValue])));
+        p[@"gap"]=@(fmin(40,fmax(0,[p[@"gap"] doubleValue])));
+        NSMutableArray *bindings=[NSMutableArray new];
+        for(NSUInteger i=0;i<4;i++) {
+            id b=i<[candidate[@"bindings"] count]?candidate[@"bindings"][i]:@{};
+            if([b isKindOfClass:NSDictionary.class] && [b[@"bundle"] isKindOfClass:NSString.class] &&
+               [b[@"title"] isKindOfClass:NSString.class] && [b[@"app"] isKindOfClass:NSString.class])
+                [bindings addObject:[b mutableCopy]];
+            else [bindings addObject:[NSMutableDictionary new]];
+        }
+        p[@"bindings"]=bindings; [profiles addObject:p];
+    }
+    if(valid) {
+        NSString *active=[loaded[@"active"] isKindOfClass:NSString.class]?loaded[@"active"]:profiles.firstObject[@"id"];
+        BOOL automatic=[loaded[@"version"] isEqual:@2]?[loaded[@"mode"] isEqual:@"auto"]:[loaded[@"locked"] isEqual:@YES];
+        self.config=[@{@"version":@2,@"active":active,@"profiles":profiles,@"mode":automatic?@"auto":@"free"} mutableCopy];
+        if([loaded[@"version"] isEqual:@1]) {
+            NSURL *backup=[directory URLByAppendingPathComponent:@"layouts-before-0.4.0.json"];
+            if(![[NSFileManager defaultManager] fileExistsAtPath:backup.path] && ![data writeToURL:backup atomically:YES]) {
+                self.saveBlocked=YES;self.statusText=@"旧配置备份失败：本次修改暂不保存，原配置仍保留。";
+            }
+        }
+    } else {
+        NSMutableDictionary *p=[self newProfile:@"默认方案"];
+        self.config=[@{@"version":@2,@"active":p[@"id"],@"profiles":[NSMutableArray arrayWithObject:p],@"mode":@"free"} mutableCopy];
+        if(data) {
+            self.saveBlocked=YES;
+            self.statusText=@"配置文件格式异常：原文件已保留，本次修改暂不保存。请从菜单打开配置文件夹，移走 layouts.json 后重启。";
+        }
+    }
+    self.config[@"active"]=self.profile[@"id"];
+    self.locked=[self.config[@"mode"] isEqual:@"auto"];
+}
+- (void)saveConfig {
+    if(self.saveBlocked)return;
+    self.config[@"mode"]=self.locked?@"auto":@"free";
+    NSError *error=nil;
+    [[NSFileManager defaultManager] createDirectoryAtURL:self.configURL.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:&error];
+    NSData *data=error?nil:[NSJSONSerialization dataWithJSONObject:self.config options:NSJSONWritingPrettyPrinted|NSJSONWritingSortedKeys error:&error];
+    BOOL ok=data && [data writeToURL:self.configURL options:NSDataWritingAtomic error:&error];
+    if(!ok)[self setMessage:[NSString stringWithFormat:@"保存失败：%@。本次调整仍可使用。",error.localizedDescription?:@"无法写入配置"]];
+}
+- (void)setMessage:(NSString *)message {
+    self.statusText=message; self.statusLabel.stringValue=message?:@"";
+}
+- (void)resetTracking:(BOOL)clearWindows {
+    [self finishPicking];
+    self.epoch++; [self.failures removeAllObjects]; [self.targets removeAllObjects];
+    [self.suspended removeAllIndexes]; [self.pending removeAllIndexes];
+    if(clearWindows)[self.runtime removeAllObjects];
+    self.lastResolve=0; self.lastUsable=nil;
+    self.dragGuard.targets=@[];
+}
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    self.runtime=[NSMutableDictionary new]; self.failures=[NSMutableDictionary new];
+    self.targets=[NSMutableDictionary new]; self.suspended=[NSMutableIndexSet new];
+    self.pending=[NSMutableIndexSet new]; self.originals=[NSMutableArray new];
+    self.histories=[NSMutableDictionary new];self.runtimeCache=[NSMutableDictionary new];
+    self.focusObserver=[FSFocusObserver new];
+    self.dragGuard=[FSDragGuard new];
+    __weak FSApp *weakSelf=self;
+    self.dragGuard.mayIntercept=^BOOL{
+        FSApp *app=weakSelf;
+        return app && app.locked && !app->_placement.switching && [app.profile[@"preventDrag"] boolValue] &&
+               !app.sleeping && !app.sessionInactive && !app.menuOpen && !app.choosingWindow && !NSApp.modalWindow &&
+               NSDate.timeIntervalSinceReferenceDate>=app.quietUntil && AXIsProcessTrusted();
+    };
+    self.dragGuard.onFailure=^(NSString *message){[weakSelf setMessage:message];[weakSelf updateStatus];};
+    self.focusObserver.onChange=^{[weakSelf scheduleAutomaticPlacement];};
+    self.inputMonitor=[NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown|NSEventMaskRightMouseDown|NSEventMaskKeyDown handler:^(NSEvent *event){
+        FSApp *app=weakSelf;
+        /* Our own global shortcuts already cancel or replace the transaction. */
+        if(event.type==NSEventTypeKeyDown && (event.modifierFlags & NSEventModifierFlagControl) &&
+           (event.modifierFlags & NSEventModifierFlagOption)) {
+            unsigned short code=event.keyCode;
+            if(code==kVK_ANSI_0 || code==kVK_ANSI_1 || code==kVK_ANSI_2 || code==kVK_ANSI_3 ||
+               code==kVK_ANSI_4 || code==kVK_ANSI_5 || code==kVK_ANSI_6 || code==kVK_ANSI_R ||
+               code==kVK_ANSI_P || code==kVK_Tab || code==kVK_ANSI_L)return;
+        }
+        if(app && app->_placement.switching) {
+            [app cancelActivation];app.quietUntil=NSDate.timeIntervalSinceReferenceDate+.3;
+            [app setMessage:@"已停止窗口前置，继续你的操作；当前布局仍然生效。"];
+        }
+    }];
+    self.localInputMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown|NSEventMaskRightMouseDown|NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event){
+        FSApp *app=weakSelf;
+        if(app && app->_placement.switching)[app cancelActivation];
+        return event;
+    }];
+    self.statusText=@"点击布局立即自动分屏；点击「自由模式」恢复自由摆放。";
+    [self loadConfig];
+    self.statusItem=[[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    self.statusItem.button.image=[NSImage imageWithSystemSymbolName:@"rectangle.split.2x1" accessibilityDescription:@"定屏"];
+    self.statusItem.button.image.template=YES;
+    if(!self.statusItem.button.image)self.statusItem.button.title=@"定屏";
+    NSMenu *menu=[NSMenu new];menu.delegate=self;self.statusItem.menu=menu;
+    self.lastExternalPID=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    NSNotificationCenter *nc=NSWorkspace.sharedWorkspace.notificationCenter;
+    [nc addObserver:self selector:@selector(appActivated:) name:NSWorkspaceDidActivateApplicationNotification object:nil];
+    [nc addObserver:self selector:@selector(spaceChanged:) name:NSWorkspaceActiveSpaceDidChangeNotification object:nil];
+    [nc addObserver:self selector:@selector(willSleep:) name:NSWorkspaceWillSleepNotification object:nil];
+    [nc addObserver:self selector:@selector(didWake:) name:NSWorkspaceDidWakeNotification object:nil];
+    [nc addObserver:self selector:@selector(sessionResigned:) name:NSWorkspaceSessionDidResignActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(sessionBecameActive:) name:NSWorkspaceSessionDidBecomeActiveNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(screensChanged:) name:NSApplicationDidChangeScreenParametersNotification object:nil];
+    [self registerHotKeys];
+    self.quietUntil=NSDate.timeIntervalSinceReferenceDate+2;
+    self.timer=[NSTimer timerWithTimeInterval:.5 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+    self.timer.tolerance=.08;
+    [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
+    self.lastTrusted=AXIsProcessTrusted();
+    BOOL newVersion=![[NSUserDefaults.standardUserDefaults stringForKey:@"lastShownVersion"] isEqual:FSVersion];
+    if(newVersion || (!self.lastTrusted && self.locked) || self.saveBlocked ||
+       [NSUserDefaults.standardUserDefaults boolForKey:@"showSettingsOnLaunch"])[self showSettings:nil];
+    [self syncDragGuard:YES];
+    [self updateStatus];
+}
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+    [self showSettings:nil];return YES;
+}
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    [self cancelActivation];[self.focusObserver stop];
+    if(self.inputMonitor)[NSEvent removeMonitor:self.inputMonitor];
+    if(self.localInputMonitor)[NSEvent removeMonitor:self.localInputMonitor];
+    [self finishPicking];
+    [self saveConfig]; [self.timer invalidate];
+    [self.dragGuard stop];
+    if(self.activity)[NSProcessInfo.processInfo endActivity:self.activity];
+    for(int i=0;i<15;i++)if(_hotKeys[i])UnregisterEventHotKey(_hotKeys[i]);
+    if(_hotHandler)RemoveEventHandler(_hotHandler);
+}
+- (void)appActivated:(NSNotification *)note {
+    NSRunningApplication *app=note.userInfo[NSWorkspaceApplicationKey];
+    if(app.processIdentifier!=getpid())self.lastExternalPID=app.processIdentifier;
+    if(self.locked && app.processIdentifier!=getpid() && app.activationPolicy==NSApplicationActivationPolicyRegular)
+        [self.focusObserver watchPID:app.processIdentifier];
+    else [self.focusObserver stop];
+    [self scheduleAutomaticPlacement];
+}
+- (void)spaceChanged:(NSNotification *)note { [self cancelActivation];[self finishPicking];self.quietUntil=NSDate.timeIntervalSinceReferenceDate+1.8; }
+- (void)willSleep:(NSNotification *)note { [self cancelActivation];[self finishPicking];self.sleeping=YES; }
+- (void)didWake:(NSNotification *)note { self.sleeping=NO;self.quietUntil=NSDate.timeIntervalSinceReferenceDate+3;[self resetTracking:NO]; }
+- (void)sessionResigned:(NSNotification *)note {[self cancelActivation];[self finishPicking];self.sessionInactive=YES;}
+- (void)sessionBecameActive:(NSNotification *)note {self.sessionInactive=NO;self.quietUntil=NSDate.timeIntervalSinceReferenceDate+2;}
+- (void)screensChanged:(NSNotification *)note {
+    [self cancelActivation];
+    self.quietUntil=NSDate.timeIntervalSinceReferenceDate+2; [self resetTracking:NO];
+    [self refreshControls];
+}
+
+- (void)cancelActivation {
+    FSPlacementCancelSwitch(&_placement);
+    self.focusGeneration++;self.observedWindow=nil;
+    self.dragGuard.targets=@[];
+}
+- (void)rememberAssignment:(FSWindow *)window slot:(NSInteger)slot {
+    if(!window)return;
+    NSString *identifier=self.profile[@"id"];
+    NSMutableArray<FSAssignment *> *history=self.histories[identifier];
+    if(!history){history=[NSMutableArray new];self.histories[identifier]=history;}
+    for(FSAssignment *entry in [history copy]) {
+        NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:entry.window.pid];
+        if(!app || app.terminated || [entry.window sameWindow:window])[history removeObject:entry];
+    }
+    FSAssignment *entry=[FSAssignment new];entry.window=window;entry.slot=slot;[history addObject:entry];
+    if(history.count>96)[history removeObjectAtIndex:0];
+}
+- (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot {
+    if(slot<0 || slot>=4)return;
+    NSMutableArray *bindings=self.profile[@"bindings"];
+    FSWindow *previous=self.runtime[@(slot)];
+    if(previous)[self rememberAssignment:previous slot:slot];
+    if(window) {
+        for(int i=0;i<4;i++)if(i!=slot && [window sameWindow:self.runtime[@(i)]]) {
+            bindings[i]=[NSMutableDictionary new];[self.runtime removeObjectForKey:@(i)];
+        }
+        bindings[slot]=[@{@"bundle":window.bundleID,@"app":window.appName,@"title":window.title} mutableCopy];
+        self.runtime[@(slot)]=window;[self rememberAssignment:window slot:slot];
+    } else {bindings[slot]=[NSMutableDictionary new];[self.runtime removeObjectForKey:@(slot)];}
+}
+- (void)scheduleAutomaticPlacement {
+    if(!self.locked || _placement.switching)return;
+    NSUInteger generation=++self.focusGeneration;
+    __weak FSApp *weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.10*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        FSApp *app=weakSelf;
+        if(app && app.focusGeneration==generation)[app captureActiveWindow];
+    });
+}
+- (void)captureActiveWindow {
+    NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    if(!self.locked || _placement.switching || self.sleeping || self.sessionInactive || self.menuOpen ||
+       self.choosingWindow || NSApp.modalWindow || now<self.quietUntil ||
+       NSEvent.pressedMouseButtons!=0 || now-self.lastMouseDown<.25 || !AXIsProcessTrusted())return;
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
+    NSRunningApplication *front=NSWorkspace.sharedWorkspace.frontmostApplication;
+    if(!front || front.processIdentifier==getpid() || front.activationPolicy!=NSApplicationActivationPolicyRegular)return;
+    [self.focusObserver watchPID:front.processIdentifier];
+    FSWindow *window=FSFocusedWindow(front.processIdentifier);FSRect frame;
+    if(!window){self.observedWindow=nil;return;}
+    /* Automatic capture never pulls a window off a different physical display. */
+    if(![window readFrame:&frame] || FSScreenForFrame(frame)!=screen)return;
+    /* Resolve the saved group before allocating a new slot (especially on restart).
+       A newly focused/restored window must not wait for the periodic resolver. */
+    [self resolveBindings:![window sameWindow:self.observedWindow]];
+    NSInteger known=-1;unsigned occupied=0;
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *other=self.runtime[@(i)];FSRect otherFrame;
+        NSRunningApplication *owner=other?[NSRunningApplication runningApplicationWithProcessIdentifier:other.pid]:nil;
+        if(other && owner && !owner.terminated && [other readFrame:&otherFrame]) {
+            occupied|=1u<<i;if([window sameWindow:other])known=i;
+        } else if(other)[self.runtime removeObjectForKey:@(i)];
+    }
+    if(known>=0 && [window sameWindow:self.observedWindow] &&
+       [window.title isEqual:self.profile[@"bindings"][known][@"title"]])return;
+    if(known<0)for(FSAssignment *entry in [self.histories[self.profile[@"id"]] reverseObjectEnumerator])
+        if([window sameWindow:entry.window]){known=entry.slot;break;}
+    int slot=FSPlacementChooseSlot(&_placement,self.zoneCount,(int)known,occupied);
+    if(slot<0)return;
+    BOOL changed=![window sameWindow:self.runtime[@(slot)]] || ![window.title isEqual:self.profile[@"bindings"][slot][@"title"]];
+    [self storeWindow:window slot:slot];self.observedWindow=window;_placement.lastSlot=slot;
+    /* Invalidate checks for displaced windows without retrying other suspended slots. */
+    self.epoch++;[self.pending removeAllIndexes];[self.suspended removeIndex:slot];
+    [self.failures removeObjectForKey:@(slot)];[self.targets removeObjectForKey:@(slot)];
+    if(changed)[self saveConfig];
+    [self arrangeSlot:slot manual:NO];
+    [self refreshDragTargets];
+    if(![self.suspended containsIndex:slot])[self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · 自动归位；原窗口仍保持打开。",window.appName,slot+1]];
+    if(self.settingsWindow.visible){self.windowChoices=FSAvailableWindows();[self refreshControls];}
+}
+- (void)seedEmptySlots {
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
+    NSArray<FSWindow *> *windows=FSAvailableWindows();
+    pid_t pid=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    FSWindow *focused=FSFocusedWindow(pid==getpid()?self.lastExternalPID:pid);
+    NSMutableArray<FSWindow *> *ordered=[NSMutableArray new];
+    if(focused)[ordered addObject:focused];
+    for(FSWindow *window in windows)if(![window sameWindow:focused])[ordered addObject:window];
+    for(FSWindow *window in ordered) {
+        FSRect frame;if(![window readFrame:&frame] || FSScreenForFrame(frame)!=screen)continue;
+        BOOL used=NO;for(FSWindow *other in self.runtime.allValues)if([window sameWindow:other]){used=YES;break;}
+        if(used)continue;
+        for(int slot=0;slot<self.zoneCount;slot++)if(![self.profile[@"bindings"][slot][@"bundle"] length]) {
+            [self storeWindow:window slot:slot];break;
+        }
+    }
+    self.windowChoices=windows;
+}
+- (void)activateCurrentLayout:(BOOL)seedEmpty {
+    if(![self requirePermission]){[self refreshControls];return;}
+    if(!FSScreenWithID(self.profile[@"display"])) {
+        [self setMessage:@"请先选择已连接的显示器。当前模式和窗口位置未改变。"];[self refreshControls];return;
+    }
+    [self cancelActivation];[self resetTracking:NO];
+    uint64_t token=FSPlacementBeginSwitch(&_placement);
+    NSMutableSet *bundles=[NSMutableSet new];
+    for(int i=0;i<self.zoneCount;i++) {
+        NSString *bundle=self.profile[@"bindings"][i][@"bundle"];if(bundle.length)[bundles addObject:bundle];
+    }
+    [self resolveBindings:YES available:FSRestorableWindows(bundles)];
+    if(seedEmpty)[self seedEmptySlots];
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *window=self.runtime[@(i)];
+        [self rememberAssignment:window slot:i];
+        [window restoreForLayout];
+    }
+    [self saveConfig];[self refreshControls];
+    [self setMessage:@"正在恢复并排列布局中的窗口…"];
+    __weak FSApp *weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.22*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        [weakSelf finishActivation:token attempt:0];
+    });
+}
+- (void)finishActivation:(uint64_t)token attempt:(NSInteger)attempt {
+    if(!FSPlacementSwitchIsCurrent(&_placement,token))return;
+    if(!AXIsProcessTrusted() || !FSScreenWithID(self.profile[@"display"]) || self.sleeping || self.sessionInactive) {
+        [self cancelActivation];[self updateStatus];return;
+    }
+    NSArray *visible=FSOnScreenRows();BOOL waiting=NO;
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *window=self.runtime[@(i)];
+        if(window && [window isRestorable] && (![window isUsable] || ![window isOnScreen:visible]))waiting=YES;
+    }
+    if(waiting && attempt<3) {
+        __weak FSApp *weakSelf=self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.28*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            [weakSelf finishActivation:token attempt:attempt+1];
+        });return;
+    }
+    [self applyLayout:YES];
+    __weak FSApp *weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.16*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        [weakSelf foregroundLayout:token];
+    });
+}
+- (void)foregroundLayout:(uint64_t)token {
+    if(!FSPlacementSwitchIsCurrent(&_placement,token))return;
+    if(!AXIsProcessTrusted() || self.sleeping || self.sessionInactive || !FSScreenWithID(self.profile[@"display"])) {
+        [self cancelActivation];return;
+    }
+    NSArray *visible=FSOnScreenRows();
+    NSMutableArray<FSWindow *> *ready=[NSMutableArray new];int firstSlot=0;
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *window=self.runtime[@(i)];
+        if(window && [window isUsable] && [window isOnScreen:visible]) {
+            if(!ready.count)firstSlot=i;[ready addObject:window];
+        }
+    }
+    FSWindow *first=ready.firstObject;
+    for(FSWindow *window in ready.reverseObjectEnumerator)[window raiseWindow];
+    BOOL requested=[first focusWindow];
+    __weak FSApp *weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.16*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        FSApp *app=weakSelf;if(!app || !FSPlacementSwitchIsCurrent(&app->_placement,token))return;
+        NSArray *rows=FSOnScreenRows();NSUInteger raised=0;
+        /* A final bounded pass keeps an app's other windows from covering the group.
+           This path is explicit-only: timers and focus capture never raise windows. */
+        for(FSWindow *window in ready.reverseObjectEnumerator)
+            if([window isOnScreen:rows] && [window raiseWindow])raised++;
+        BOOL focused=first && NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier==first.pid &&
+                     [first sameWindow:FSFocusedWindow(first.pid)];
+        FSPlacementFinishSwitch(&app->_placement,token);
+        app->_placement.lastSlot=firstSlot;app.observedWindow=focused?first:nil;
+        app.quietUntil=NSDate.timeIntervalSinceReferenceDate+.55;
+        if(focused)[app.settingsWindow orderOut:nil];
+        if(!app.suspended.count) {
+            if(!app.boundCount)[app setMessage:@"自动分屏已开启。现在打开或切换目标屏幕上的窗口，它会自动进入空闲分区。"];
+            else [app setMessage:[NSString stringWithFormat:@"布局已启用 · %lu / %ld 个窗口可用，%lu 个已前置。%@",(unsigned long)ready.count,(long)app.boundCount,(unsigned long)raised,
+                focused?@"可直接操作第一格的可用窗口。":(requested?@"系统尚未交出焦点，可直接点目标窗口。":@"不可用窗口已跳过；不会自动启动应用。")]];
+        }
+        app.windowChoices=FSAvailableWindows();
+        [app syncDragGuard:YES];[app refreshControls];
+    });
+}
+
+- (void)registerHotKeys {
+    EventTypeSpec type={kEventClassKeyboard,kEventHotKeyPressed};
+    OSStatus handler=InstallEventHandler(GetApplicationEventTarget(),hotKeyCallback,1,&type,(__bridge void *)self,&_hotHandler);
+    if(handler!=noErr){self.hotkeyWarning=@"快捷键注册失败，仍可使用菜单操作。";return;}
+    UInt32 codes[]={kVK_ANSI_1,kVK_ANSI_2,kVK_ANSI_3,kVK_ANSI_4,kVK_ANSI_R,kVK_ANSI_P,
+                    kVK_ANSI_1,kVK_ANSI_2,kVK_ANSI_3,kVK_ANSI_4,kVK_ANSI_5,kVK_ANSI_6,kVK_Tab,kVK_ANSI_L,kVK_ANSI_0};
+    NSArray *names=@[@"⌃⌥1",@"⌃⌥2",@"⌃⌥3",@"⌃⌥4",@"⌃⌥R",@"⌃⌥P",
+                     @"⌃⌥⌘1",@"⌃⌥⌘2",@"⌃⌥⌘3",@"⌃⌥⌘4",@"⌃⌥⌘5",@"⌃⌥⌘6",@"⌃⌥Tab",@"⌃⌥L",@"⌃⌥⌘0"];
+    NSMutableArray *failed=[NSMutableArray new];
+    for(int i=0;i<15;i++) {
+        EventHotKeyID key={'FSpl',(UInt32)i+1};
+        UInt32 modifiers=controlKey|optionKey;
+        if((i>=6 && i<=11) || i==14)modifiers|=cmdKey;
+        if(RegisterEventHotKey(codes[i],modifiers,key,GetApplicationEventTarget(),0,&_hotKeys[i])!=noErr)
+            [failed addObject:names[i]];
+    }
+    self.hotkeyWarning=failed.count?[@"快捷键被占用：" stringByAppendingString:[failed componentsJoinedByString:@"、"]]:@"";
+}
+- (void)handleHotKey:(UInt32)identifier {
+    if(identifier>=1 && identifier<=4)[self bindFocusedSlot:(NSInteger)identifier-1];
+    else if(identifier==5)[self applyNow:nil];
+    else if(identifier==6)[self toggleLock:nil];
+    else if(identifier>=7 && identifier<=12)[self activatePreset:(NSInteger)identifier-7];
+    else if(identifier==13)[self nextProfile:nil];
+    else if(identifier==14)[self toggleDragMode:nil];
+    else if(identifier==15)[self unlockLayout:nil];
+}
+- (NSMenuItem *)item:(NSString *)title action:(SEL)action value:(id)value {
+    NSMenuItem *i=[[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""];
+    i.target=self;i.representedObject=value;return i;
+}
+- (void)menuWillOpen:(NSMenu *)menu {if(_placement.switching)[self cancelActivation];self.menuOpen=YES;}
+- (void)menuDidClose:(NSMenu *)menu {self.menuOpen=NO;}
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if(menu!=self.statusItem.menu)return;
+    menu.autoenablesItems=NO;[menu removeAllItems];
+    NSString *state=!self.locked?@"自由模式":(!AXIsProcessTrusted()?@"等待授权":(!FSScreenWithID(self.profile[@"display"])?@"等待显示器":@"自动分屏中"));
+    NSMenuItem *heading=[self item:[NSString stringWithFormat:@"定屏 · %@ · %@",state,self.profile[@"name"]] action:NULL value:nil];
+    heading.enabled=NO;[menu addItem:heading];
+    [menu addItem:[self item:@"打开布局设置…" action:@selector(showSettings:) value:nil]];
+    [menu addItem:[self item:self.locked?@"重新显示这组窗口   ⌃⌥R":@"启用上次布局   ⌃⌥R" action:@selector(applyNow:) value:nil]];
+    [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *quickHeading=[self item:@"选择模式（点击立即生效）" action:NULL value:nil];
+    quickHeading.enabled=NO;[menu addItem:quickHeading];
+    NSMenuItem *free=[self item:@"自由模式 · 不分屏   ⌃⌥⌘0" action:@selector(unlockLayout:) value:nil];
+    free.state=self.locked?NSControlStateValueOff:NSControlStateValueOn;[menu addItem:free];
+    NSInteger presetIndex=0;
+    for(NSDictionary *preset in quickPresets()) {
+        NSInteger index=presetIndex++;
+        NSMenuItem *i=[self item:[NSString stringWithFormat:@"%@   ⌃⌥⌘%ld",preset[@"name"],(long)index+1]
+                         action:@selector(presetFromMenu:) value:@(index)];
+        i.state=self.locked && [self matchesPreset:preset]?NSControlStateValueOn:NSControlStateValueOff;[menu addItem:i];
+    }
+    NSMenuItem *profiles=[self item:@"切换保存的方案" action:NULL value:nil];NSMenu *sub=[NSMenu new];
+    for(NSDictionary *p in self.config[@"profiles"]) {
+        NSMenuItem *i=[self item:p[@"name"] action:@selector(profileFromMenu:) value:p[@"id"]];
+        i.state=self.locked && [p[@"id"] isEqual:self.profile[@"id"]]?NSControlStateValueOn:NSControlStateValueOff;[sub addItem:i];
+    }
+    [sub addItem:NSMenuItem.separatorItem];[sub addItem:[self item:@"下一个方案   ⌃⌥Tab" action:@selector(nextProfile:) value:nil]];
+    profiles.submenu=sub;[menu addItem:profiles];
+    NSMenuItem *bind=[self item:@"将当前窗口放到…" action:NULL value:nil];NSMenu *bindMenu=[NSMenu new];
+    NSArray *positions=positionNames([self.profile[@"layout"] intValue]);
+    for(int i=0;i<self.zoneCount;i++)
+        [bindMenu addItem:[self item:[NSString stringWithFormat:@"%d · %@   ⌃⌥%d",i+1,positions[i],i+1] action:@selector(bindFromMenu:) value:@(i)]];
+    bind.submenu=bindMenu;[menu addItem:bind];
+    [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *more=[self item:@"更多操作" action:NULL value:nil];NSMenu *extra=[NSMenu new];
+    [extra addItem:[self item:@"用当前屏幕的窗口填满空格" action:@selector(autoFill:) value:nil]];
+    [extra addItem:[self item:@"交换 / 轮换分区窗口" action:@selector(rotateWindows:) value:nil]];
+    [extra addItem:[self item:@"仅整理一次，然后进入自由模式" action:@selector(arrangeOnce:) value:nil]];
+    NSMenuItem *drag=[self item:@"固定时阻止标题栏拖动   ⌃⌥L" action:@selector(toggleDragMode:) value:nil];
+    drag.state=[self.profile[@"preventDrag"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;[extra addItem:drag];
+    [extra addItem:[self item:@"恢复分屏前的位置（本次运行）" action:@selector(restoreOriginals:) value:nil]];
+    [extra addItem:NSMenuItem.separatorItem];
+    [extra addItem:[self item:@"打开权限设置…" action:@selector(openPermission:) value:nil]];
+    [extra addItem:[self item:@"权限诊断…" action:@selector(showPermissionDiagnostics:) value:nil]];
+    [extra addItem:[self item:@"在 Finder 中显示当前应用" action:@selector(revealCurrentApp:) value:nil]];
+    [extra addItem:[self item:@"打开配置文件夹" action:@selector(openConfigFolder:) value:nil]];
+    [extra addItem:[self item:@"设置开机启动…" action:@selector(openLoginSettings:) value:nil]];
+    [extra addItem:[self item:@"使用说明" action:@selector(showHelp:) value:nil]];
+    more.submenu=extra;[menu addItem:more];
+    [menu addItem:[self item:@"退出定屏" action:@selector(quit:) value:nil]];
+}
+
+- (void)createSettingsWindow {
+    CGFloat height=fmin(852,fmax(520,(NSScreen.mainScreen?:NSScreen.screens.firstObject).visibleFrame.size.height-68));
+    self.settingsWindow=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,820,height)
+                  styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable
+                  backing:NSBackingStoreBuffered defer:NO];
+    self.settingsWindow.title=@"定屏 — 自动分屏";self.settingsWindow.releasedWhenClosed=NO;
+    self.settingsWindow.delegate=self;[self.settingsWindow center];
+    FSFlippedView *root=[[FSFlippedView alloc] initWithFrame:NSMakeRect(0,0,820,height)];
+    self.settingsWindow.contentView=root;
+    self.scrollView=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,820,height-112)];
+    self.scrollView.hasVerticalScroller=YES;self.scrollView.autohidesScrollers=YES;self.scrollView.drawsBackground=NO;
+    [root addSubview:self.scrollView];
+    self.moreExpanded=[NSUserDefaults.standardUserDefaults boolForKey:@"showAdvanced"];
+    self.documentView=[[FSFlippedView alloc] initWithFrame:NSMakeRect(0,0,820,self.moreExpanded?1030:792)];
+    FSFlippedView *v=self.documentView;self.scrollView.documentView=v;
+
+    [v addSubview:label(@"定屏",NSMakeRect(24,16,130,34),27,YES)];
+    [v addSubview:label(@"选一个布局，窗口自动归位；想自由摆放，选「自由模式」。",NSMakeRect(26,54,650,18),12,NO)];
+    self.stateLabel=label(@"",NSMakeRect(536,27,258,24),13,YES);
+    self.stateLabel.alignment=NSTextAlignmentRight;[v addSubview:self.stateLabel];
+    NSTextField *version=label([@"v" stringByAppendingString:FSVersion],NSMakeRect(690,55,104,17),11,NO);
+    version.textColor=NSColor.secondaryLabelColor;version.alignment=NSTextAlignmentRight;[v addSubview:version];
+
+    FSCard *guide=[[FSCard alloc] initWithFrame:NSMakeRect(24,84,772,90)];[v addSubview:guide];
+    self.guideTitle=label(@"",NSMakeRect(14,10,562,22),14,YES);[guide addSubview:self.guideTitle];
+    self.guideDetail=label(@"",NSMakeRect(14,36,562,42),12,NO);
+    self.guideDetail.maximumNumberOfLines=2;self.guideDetail.lineBreakMode=NSLineBreakByWordWrapping;
+    [self.guideDetail.cell setUsesSingleLineMode:NO];[guide addSubview:self.guideDetail];
+    self.guideButton=button(@"",NSMakeRect(600,11,158,32),self,NULL);[guide addSubview:self.guideButton];
+    [guide addSubview:button(@"权限诊断",NSMakeRect(628,49,130,28),self,@selector(showPermissionDiagnostics:))];
+
+    [v addSubview:label(@"选择模式",NSMakeRect(26,185,190,22),14,YES)];
+    NSTextField *quickHint=label(@"点击立即生效 · 无需逐个绑定窗口",NSMakeRect(324,188,470,18),11,NO);
+    quickHint.textColor=NSColor.secondaryLabelColor;quickHint.alignment=NSTextAlignmentRight;[v addSubview:quickHint];
+    self.freeButton=button(@"自由模式",NSMakeRect(24,214,106,70),self,@selector(unlockLayout:));
+    [self.freeButton setButtonType:NSButtonTypePushOnPushOff];self.freeButton.bezelStyle=NSBezelStyleRegularSquare;
+    self.freeButton.image=[NSImage imageWithSystemSymbolName:@"macwindow" accessibilityDescription:@"不分屏"];
+    self.freeButton.imagePosition=NSImageAbove;self.freeButton.font=[NSFont systemFontOfSize:12];
+    self.freeButton.toolTip=@"不分屏、不自动归位、不固定；保留窗口当前位置。⌃⌥⌘0";[v addSubview:self.freeButton];
+    self.presetButtons=[NSMutableArray new];NSInteger index=0;
+    for(NSDictionary *preset in quickPresets()) {
+        NSButton *b=button(preset[@"name"],NSMakeRect(135+111*index,214,106,70),self,@selector(presetFromButton:));
+        b.tag=index++;[b setButtonType:NSButtonTypePushOnPushOff];b.bezelStyle=NSBezelStyleRegularSquare;
+        b.image=layoutIcon(preset);b.imagePosition=NSImageAbove;b.font=[NSFont systemFontOfSize:12];
+        b.toolTip=[NSString stringWithFormat:@"⌃⌥⌘%ld：立即启用布局，将已有窗口带到前台；之后激活的窗口自动归位。",(long)b.tag+1];
+        [v addSubview:b];[self.presetButtons addObject:b];
+    }
+
+    self.preview=[[FSPreview alloc] initWithFrame:NSMakeRect(24,304,306,150)];
+    self.preview.toolTip=@"黑框标记最近使用的分区。分区全满时，新窗口进入这里；也可点击预览指定。";
+    __weak FSApp *weakSelf=self;
+    self.preview.onSelectSlot=^(NSInteger slot){
+        FSApp *app=weakSelf;
+        if(app && app.locked && !app.choosingWindow && slot>=0 && slot<app.zoneCount) {
+            app->_placement.lastSlot=(int)slot;[app refreshControls];
+            app.observedWindow=FSFocusedWindow(app.lastExternalPID);
+            [app setMessage:[NSString stringWithFormat:@"已选区域 %ld：没有空位时，新窗口会进入这里。",(long)slot+1]];
+        }
+    };
+    [v addSubview:self.preview];
+    [v addSubview:label(@"在哪块屏幕上分屏",NSMakeRect(352,305,250,18),11,YES)];
+    self.screenPopup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(348,329,448,30) pullsDown:NO];
+    self.screenPopup.target=self;self.screenPopup.action=@selector(screenChanged:);self.screenPopup.menu.delegate=self;
+    [v addSubview:self.screenPopup];
+    [v addSubview:label(@"保存的布局与窗口组合",NSMakeRect(352,379,230,18),11,YES)];
+    self.profilePopup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(348,402,310,30) pullsDown:NO];
+    self.profilePopup.target=self;self.profilePopup.action=@selector(profileChanged:);self.profilePopup.menu.delegate=self;
+    [v addSubview:self.profilePopup];
+    NSPopUpButton *manage=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(665,402,131,30) pullsDown:YES];
+    [manage addItemWithTitle:@"管理方案"];manage.menu.delegate=self;
+    [manage.menu addItem:[self item:@"另存为新方案…" action:@selector(duplicateProfile:) value:nil]];
+    [manage.menu addItem:[self item:@"重命名…" action:@selector(renameProfile:) value:nil]];
+    [manage.menu addItem:[self item:@"删除此方案…" action:@selector(deleteProfile:) value:nil]];
+    [v addSubview:manage];
+    NSTextField *savedHint=label(@"当前组合自动保存；选择方案会立即切换并前置窗口",NSMakeRect(352,439,442,18),11,NO);
+    savedHint.textColor=NSColor.secondaryLabelColor;[v addSubview:savedHint];
+
+    [v addSubview:label(@"分区窗口（自动更新）",NSMakeRect(26,474,270,22),14,YES)];
+    self.fillButton=button(@"填入空闲分区",NSMakeRect(440,468,213,30),self,@selector(autoFill:));
+    self.fillButton.toolTip=@"用目标屏幕已有窗口填空位；保留其他分区。自由模式中只准备组合。";[v addSubview:self.fillButton];
+    NSButton *refresh=button(@"更新窗口列表",NSMakeRect(662,468,134,30),self,@selector(refreshWindowList:));
+    refresh.toolTip=@"刚打开的应用没有出现在下拉列表时，点这里重新查找。";[v addSubview:refresh];
+    NSTextField *pickHint=label(@"平时直接切换应用即可；这里可手动换窗口。同一分区原来的窗口会留在后面。",NSMakeRect(28,505,766,20),11,NO);
+    pickHint.textColor=NSColor.secondaryLabelColor;[v addSubview:pickHint];
+    self.bindingLabels=[NSMutableArray new];self.bindingPopups=[NSMutableArray new];self.pickButtons=[NSMutableArray new];
+    for(int i=0;i<4;i++) {
+        CGFloat y=534+36*i;
+        NSTextField *l=label(@"",NSMakeRect(28,y+5,94,22),11,YES);[v addSubview:l];[self.bindingLabels addObject:l];
+        NSPopUpButton *popup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(124,y,544,30) pullsDown:NO];
+        popup.tag=i;popup.target=self;popup.action=@selector(bindingChanged:);popup.menu.delegate=self;
+        [v addSubview:popup];[self.bindingPopups addObject:popup];
+        NSButton *pick=button(@"用鼠标选",NSMakeRect(678,y,118,30),self,@selector(beginPicking:));
+        pick.tag=i;pick.toolTip=@"点此按钮后，在 12 秒内点击要选择的应用窗口。点击会正常传给目标应用，请点标题栏空白处。";
+        [v addSubview:pick];[self.pickButtons addObject:pick];
+    }
+    [v addSubview:label(@"固定时的拖动规则",NSMakeRect(28,693,152,22),12,YES)];
+    self.lockModePopup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(183,688,253,30) pullsDown:NO];
+    [self.lockModePopup addItemsWithTitles:@[@"拖动后松手，自动回位",@"阻止拖动窗口标题栏"]];
+    self.lockModePopup.target=self;self.lockModePopup.action=@selector(lockModeChanged:);self.lockModePopup.menu.delegate=self;
+    self.lockModePopup.toolTip=@"禁止拖动仅拦截可识别的标题栏；其他移动以回位兜底。选「自由模式」随时停止。";[v addSubview:self.lockModePopup];
+    self.guardStatusLabel=label(@"",NSMakeRect(452,694,342,22),11,NO);[v addSubview:self.guardStatusLabel];
+    NSTextField *modeHint=label(@"只在固定位置时生效；自定义标题栏无法阻止拖动时，仍会在松手后回位。",NSMakeRect(28,721,766,20),11,NO);
+    modeHint.textColor=NSColor.secondaryLabelColor;[v addSubview:modeHint];
+    self.moreButton=button(self.moreExpanded?@"收起更多设置 ▴":@"更多设置 · 比例、间距、启动 ▾",NSMakeRect(24,752,316,30),self,@selector(toggleMore:));
+    [v addSubview:self.moreButton];
+
+    FSCard *advanced=[[FSCard alloc] initWithFrame:NSMakeRect(24,788,772,226)];
+    self.advancedView=advanced;advanced.hidden=!self.moreExpanded;[v addSubview:advanced];
+    [advanced addSubview:label(@"完整布局",NSMakeRect(14,13,86,22),12,YES)];
+    self.layoutPopup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(102,8,274,30) pullsDown:NO];
+    [self.layoutPopup addItemsWithTitles:layoutNames()];self.layoutPopup.target=self;self.layoutPopup.action=@selector(layoutChanged:);
+    self.layoutPopup.menu.delegate=self;[advanced addSubview:self.layoutPopup];
+    [advanced addSubview:button(@"使用当前屏幕",NSMakeRect(548,8,210,30),self,@selector(useCurrentScreen:))];
+    self.ratioLabel=label(@"",NSMakeRect(14,53,360,19),11,NO);[advanced addSubview:self.ratioLabel];
+    self.ratioSlider=[NSSlider sliderWithValue:50 minValue:20 maxValue:80 target:self action:@selector(ratioChanged:)];
+    self.ratioSlider.frame=NSMakeRect(14,80,358,24);self.ratioSlider.continuous=YES;[advanced addSubview:self.ratioSlider];
+    self.gapLabel=label(@"",NSMakeRect(400,53,358,19),11,NO);[advanced addSubview:self.gapLabel];
+    self.gapSlider=[NSSlider sliderWithValue:8 minValue:0 maxValue:40 target:self action:@selector(gapChanged:)];
+    self.gapSlider.frame=NSMakeRect(400,80,358,24);self.gapSlider.continuous=YES;[advanced addSubview:self.gapSlider];
+    self.permissionLabel=label(@"",NSMakeRect(14,128,510,23),12,NO);[advanced addSubview:self.permissionLabel];
+    self.permissionButton=button(@"打开权限设置",NSMakeRect(548,121,210,32),self,@selector(openPermission:));[advanced addSubview:self.permissionButton];
+    self.launchCheckbox=[NSButton checkboxWithTitle:@"启动时打开设置窗口" target:self action:@selector(launchPreferenceChanged:)];
+    self.launchCheckbox.frame=NSMakeRect(14,178,354,25);
+    self.launchCheckbox.state=[NSUserDefaults.standardUserDefaults boolForKey:@"showSettingsOnLaunch"]?NSControlStateValueOn:NSControlStateValueOff;
+    self.launchCheckbox.toolTip=@"首次使用、升级或自动模式缺少权限时仍显示引导；启动不会把整组窗口抢到前台。";[advanced addSubview:self.launchCheckbox];
+    [advanced addSubview:button(@"设置开机启动…",NSMakeRect(548,175,210,30),self,@selector(openLoginSettings:))];
+
+    FSFlippedView *footer=[[FSFlippedView alloc] initWithFrame:NSMakeRect(0,height-112,820,112)];[root addSubview:footer];
+    NSBox *line=[[NSBox alloc] initWithFrame:NSMakeRect(0,0,820,1)];line.boxType=NSBoxSeparator;[footer addSubview:line];
+    self.lockButton=button(@"显示这组窗口",NSMakeRect(24,12,226,36),self,@selector(applyNow:));
+    self.lockButton.toolTip=@"按当前布局重新排列，并把这一组窗口带到前台。";[footer addSubview:self.lockButton];
+    self.rotateButton=button(@"交换窗口位置",NSMakeRect(264,12,174,36),self,@selector(rotateWindows:));[footer addSubview:self.rotateButton];
+    self.restoreButton=button(@"恢复分屏前的位置",NSMakeRect(450,12,220,36),self,@selector(restoreOriginals:));
+    self.restoreButton.toolTip=@"进入自由模式，再恢复本次启动后首次分屏前的位置。";[footer addSubview:self.restoreButton];
+    [footer addSubview:button(@"使用说明",NSMakeRect(682,12,114,36),self,@selector(showHelp:))];
+    self.statusLabel=label(@"",NSMakeRect(26,62,770,38),11,NO);
+    self.statusLabel.maximumNumberOfLines=2;self.statusLabel.lineBreakMode=NSLineBreakByWordWrapping;
+    [self.statusLabel.cell setUsesSingleLineMode:NO];self.statusLabel.textColor=NSColor.secondaryLabelColor;[footer addSubview:self.statusLabel];
+}
+
+- (void)showSettings:(id)sender {
+    [self cancelActivation];
+    if(!self.settingsWindow)[self createSettingsWindow];
+    [self refreshWindowList:nil];
+    [NSApp activateIgnoringOtherApps:YES];[self.settingsWindow makeKeyAndOrderFront:nil];
+    [NSUserDefaults.standardUserDefaults setObject:FSVersion forKey:@"lastShownVersion"];
+}
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    if(!self.choosingWindow && NSDate.timeIntervalSinceReferenceDate-self.lastWindowRefresh>1)[self refreshWindowList:nil];
+}
+- (void)windowWillClose:(NSNotification *)notification {[self finishPicking];}
+- (void)refreshWindowList:(id)sender {
+    if(sender)[self cancelActivation];
+    self.windowChoices=FSAvailableWindows();self.lastWindowRefresh=NSDate.timeIntervalSinceReferenceDate;
+    if(AXIsProcessTrusted())[self resolveBindings:YES available:self.windowChoices];
+    [self refreshControls];
+    if(sender) {
+        if(![self requirePermission])return;
+        [self resetTracking:NO];
+        [self setMessage:self.windowChoices.count?@"窗口列表已刷新。只列出当前桌面中可调整的普通窗口。":@"未找到可调整窗口：请退出目标窗口的全屏或最小化状态。"];
+        [self syncDragGuard:YES];
+    }
+}
+- (NSInteger)boundCount {
+    NSInteger n=0;for(int i=0;i<self.zoneCount;i++)if([self.profile[@"bindings"][i][@"bundle"] length])n++;
+    return n;
+}
+- (void)updateStatus {
+    BOOL trusted=AXIsProcessTrusted(),connected=FSScreenWithID(self.profile[@"display"])!=nil;
+    BOOL active=self.locked && trusted && connected && !self.choosingWindow && !self.sleeping && !self.sessionInactive;
+    if(active && !self.activity)
+        self.activity=[NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep reason:@"保持用户启用的自动分屏"];
+    else if(!active && self.activity) {
+        [NSProcessInfo.processInfo endActivity:self.activity];self.activity=nil;
+    }
+    NSString *state=!self.locked?@"自由模式":(!trusted?@"等待授权":(!connected?@"等待显示器":(_placement.switching?@"正在切换":@"自动分屏中")));
+    self.stateLabel.stringValue=state;
+    self.stateLabel.textColor=active?NSColor.systemGreenColor:NSColor.secondaryLabelColor;
+    self.permissionLabel.stringValue=trusted?@"● 已获辅助功能授权":@"● 尚未授权；自由模式可正常使用";
+    self.permissionLabel.textColor=trusted?NSColor.systemGreenColor:NSColor.systemOrangeColor;
+    self.lockButton.enabled=trusted && connected && !self.choosingWindow;
+    self.lockButton.title=self.locked?@"显示这组窗口":@"启用当前布局";
+    self.freeButton.state=self.locked?NSControlStateValueOff:NSControlStateValueOn;
+    for(NSButton *b in self.presetButtons)b.state=self.locked && [self matchesPreset:quickPresets()[b.tag]]?NSControlStateValueOn:NSControlStateValueOff;
+    self.restoreButton.enabled=trusted && self.originals.count>0 && !self.choosingWindow;
+    self.rotateButton.enabled=trusted && connected && self.boundCount>=2 && !self.choosingWindow;
+    self.rotateButton.title=self.zoneCount==2?@"交换窗口位置":@"窗口依次换一格";
+    self.fillButton.enabled=trusted && connected && self.boundCount<self.zoneCount && !self.choosingWindow;
+    for(NSButton *b in self.pickButtons)b.enabled=trusted && connected && b.tag<self.zoneCount && !self.choosingWindow;
+    self.lockModePopup.enabled=!self.choosingWindow;
+    self.preview.freeMode=!self.locked;self.preview.activeSlot=_placement.lastSlot;self.preview.needsDisplay=YES;
+    if(!self.locked)self.guardStatusLabel.stringValue=@"自由模式 · 不固定窗口";
+    else if(!trusted || !connected)self.guardStatusLabel.stringValue=@"条件未就绪 · 暂停调整";
+    else if(self.choosingWindow || _placement.switching)self.guardStatusLabel.stringValue=@"操作期间暂不拦截拖动";
+    else if(![self.profile[@"preventDrag"] boolValue])self.guardStatusLabel.stringValue=@"自动分屏 · 拖走后松手回位";
+    else self.guardStatusLabel.stringValue=self.dragGuard.running?@"自动分屏 · 阻止标题栏拖动":@"标题栏拦截不可用 · 松手回位";
+    self.guardStatusLabel.textColor=NSColor.secondaryLabelColor;
+    self.statusItem.button.title=self.statusItem.button.image?(self.locked?(!trusted || !connected?@" !":@" 自动"):@""):@"定屏";
+    self.statusItem.button.toolTip=[NSString stringWithFormat:@"定屏 · %@ · %@",state,self.profile[@"name"]];
+    self.statusLabel.stringValue=self.statusText?:@"点击布局立即生效。";
+    self.guideButton.enabled=YES;
+    if(self.choosingWindow) {
+        NSInteger seconds=MAX(0,(NSInteger)ceil(self.pickingDeadline-NSDate.timeIntervalSinceReferenceDate));
+        self.guideTitle.stringValue=[NSString stringWithFormat:@"点击区域 %ld 要使用的窗口（%ld 秒）",(long)self.pickingSlot+1,(long)seconds];
+        self.guideDetail.stringValue=@"请点目标窗口标题栏空白处；超时会取消。选择期间暂停自动归位。";
+        self.guideButton.title=@"取消选择";self.guideButton.action=@selector(cancelPicking:);
+    } else if(!trusted) {
+        self.guideTitle.stringValue=self.locked?@"自动分屏需要辅助功能权限":@"当前为自由模式 · 分屏前需授权";
+        self.guideDetail.stringValue=@"点右侧按钮手动授权。系统开关已开仍无效时，可查看「权限诊断」。";
+        self.guideButton.title=@"打开权限设置";self.guideButton.action=@selector(openPermission:);
+    } else if(!self.locked) {
+        self.guideTitle.stringValue=@"自由模式 · 窗口由你自己摆放";
+        self.guideDetail.stringValue=@"点击下方任一布局立即开始自动分屏。设置和窗口组合仍保留，切回时可继续使用。";
+        self.guideButton.title=@"启用当前布局";self.guideButton.action=@selector(fixLayout:);
+    } else if(!connected) {
+        self.guideTitle.stringValue=@"目标显示器未连接 · 自动分屏暂停";
+        self.guideDetail.stringValue=@"连接原显示器，或选择现在使用的屏幕。也可随时切回自由模式。";
+        self.guideButton.title=@"使用当前屏幕";self.guideButton.action=@selector(useCurrentScreen:);
+    } else if(_placement.switching) {
+        self.guideTitle.stringValue=@"正在恢复并显示布局中的窗口";
+        self.guideDetail.stringValue=@"点击其他布局以最后一次为准；点击自由模式会立即停止后续调整。";
+        self.guideButton.title=@"自由模式";self.guideButton.action=@selector(unlockLayout:);
+    } else if(self.suspended.count) {
+        self.guideTitle.stringValue=@"部分窗口受尺寸限制";
+        self.guideDetail.stringValue=@"这些窗口已暂停固定。可增大分区、换成两栏，或点「显示这组窗口」重试。";
+        self.guideButton.title=@"显示这组窗口";self.guideButton.action=@selector(applyNow:);
+    } else {
+        self.guideTitle.stringValue=[NSString stringWithFormat:@"自动分屏中 · %@ · %d 个分区",layoutNames()[[self.profile[@"layout"] integerValue]],self.zoneCount];
+        self.guideDetail.stringValue=@"打开或切换窗口即可自动归位。有空格先填空格；全部占满时，新窗口进入最近使用的分区。";
+        self.guideButton.title=@"自由模式";self.guideButton.action=@selector(unlockLayout:);
+    }
+}
+- (void)refreshControls {
+    if(!self.settingsWindow)return;
+    self.refreshing=YES;
+    NSMutableDictionary *p=self.profile;
+    [self.profilePopup removeAllItems];
+    for(NSDictionary *candidate in self.config[@"profiles"]) {
+        NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:candidate[@"name"] action:nil keyEquivalent:@""];
+        [self.profilePopup.menu addItem:item];self.profilePopup.lastItem.representedObject=candidate[@"id"];
+        if([candidate[@"id"] isEqual:p[@"id"]])[self.profilePopup selectItem:self.profilePopup.lastItem];
+    }
+    [self.screenPopup removeAllItems];
+    BOOL found=NO;
+    NSUInteger screenIndex=0;
+    for(NSScreen *s in NSScreen.screens) {
+        NSString *sid=FSDisplayID(s);
+        [self.screenPopup addItemWithTitle:[NSString stringWithFormat:@"%lu · %@ · %.0f × %.0f",(unsigned long)++screenIndex,s.localizedName,s.frame.size.width,s.frame.size.height]];
+        self.screenPopup.lastItem.representedObject=sid;
+        if([sid isEqual:p[@"display"]]){found=YES;[self.screenPopup selectItem:self.screenPopup.lastItem];}
+    }
+    if(!found) {
+        [self.screenPopup addItemWithTitle:@"保存的显示器未连接（暂停调整）"];
+        self.screenPopup.lastItem.representedObject=p[@"display"];[self.screenPopup selectItem:self.screenPopup.lastItem];
+    }
+    int kind=[p[@"layout"] intValue];
+    [self.lockModePopup selectItemAtIndex:[p[@"preventDrag"] boolValue]?1:0];
+    for(NSButton *b in self.presetButtons)b.state=self.locked && [self matchesPreset:quickPresets()[b.tag]]?NSControlStateValueOn:NSControlStateValueOff;
+    [self.layoutPopup selectItemAtIndex:kind];
+    self.ratioSlider.doubleValue=[p[@"ratio"] doubleValue]*100;
+    self.gapSlider.doubleValue=[p[@"gap"] doubleValue];
+    BOOL ratioUseful=(kind!=FSLayoutColumns3 && kind!=FSLayoutFill);
+    self.ratioSlider.enabled=ratioUseful;
+    int r=(int)round(self.ratioSlider.doubleValue);
+    self.ratioLabel.stringValue=ratioUseful?[NSString stringWithFormat:@"%@ %d%%  /  %@ %d%%",kind==FSLayoutRows2?@"上方":@"左侧",r,kind==FSLayoutRows2?@"下方":@"右侧",100-r]:@"此布局使用固定比例";
+    self.gapLabel.stringValue=[NSString stringWithFormat:@"窗口间距与外边距：%d 点",(int)round(self.gapSlider.doubleValue)];
+    NSMutableArray *names=[NSMutableArray new];
+    NSArray *positions=positionNames(kind);
+    for(int i=0;i<4;i++) {
+        NSPopUpButton *popup=self.bindingPopups[i];NSDictionary *binding=p[@"bindings"][i];
+        BOOL enabled=i<self.zoneCount;
+        popup.enabled=enabled;self.bindingLabels[i].textColor=enabled?NSColor.labelColor:NSColor.tertiaryLabelColor;
+        self.bindingLabels[i].stringValue=enabled?[NSString stringWithFormat:@"%d · %@",i+1,positions[i]]:[NSString stringWithFormat:@"%d · 未使用",i+1];
+        [popup removeAllItems];[popup addItemWithTitle:enabled?@"空闲分区 / 清空此区域":@"此布局未使用该区域"];
+        if(binding[@"bundle"]) {
+            NSString *state=enabled?(AXIsProcessTrusted()?@"暂不可见":@"已保存"):@"已保留";
+            [popup addItemWithTitle:[NSString stringWithFormat:@"%@ · %@ — %@",state,binding[@"app"],binding[@"title"]]];
+            popup.lastItem.representedObject=@"saved";[popup selectItem:popup.lastItem];
+        }
+        for(FSWindow *w in self.windowChoices) {
+            NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:w.label action:nil keyEquivalent:@""];
+            NSImage *icon=[[NSRunningApplication runningApplicationWithProcessIdentifier:w.pid].icon copy];
+            icon.size=NSMakeSize(16,16);item.image=icon;
+            [popup.menu addItem:item];popup.lastItem.representedObject=w;
+            if([w sameWindow:self.runtime[@(i)]]) {
+                if([self.suspended containsIndex:i])item.title=[@"尺寸受限 · " stringByAppendingString:item.title];
+                [popup selectItem:popup.lastItem];
+            }
+        }
+        [names addObject:enabled?(binding[@"app"]?:@""):@""];
+    }
+    NSScreen *screen=FSScreenWithID(p[@"display"]);
+    FSRect usable=screen?FSUsableFrame(screen):(FSRect){0,0,16,9};
+    self.preview.layout=kind;self.preview.ratio=[p[@"ratio"] doubleValue];self.preview.gap=[p[@"gap"] doubleValue];
+    self.preview.aspect=usable.width/usable.height;self.preview.names=names;self.preview.needsDisplay=YES;
+    self.statusLabel.stringValue=self.statusText?:@"";
+    self.refreshing=NO;[self updateStatus];
+}
+
+- (void)toggleMore:(id)sender {
+    self.moreExpanded=!self.moreExpanded;
+    [NSUserDefaults.standardUserDefaults setBool:self.moreExpanded forKey:@"showAdvanced"];
+    self.advancedView.hidden=!self.moreExpanded;
+    self.moreButton.title=self.moreExpanded?@"收起更多设置 ▴":@"更多设置 · 比例、间距、启动 ▾";
+    [self.documentView setFrameSize:NSMakeSize(820,self.moreExpanded?1030:792)];
+    if(self.moreExpanded)[self.documentView scrollRectToVisible:self.advancedView.frame];
+    else [self.documentView scrollRectToVisible:self.moreButton.frame];
+}
+- (void)launchPreferenceChanged:(NSButton *)sender {
+    [NSUserDefaults.standardUserDefaults setBool:sender.state==NSControlStateValueOn forKey:@"showSettingsOnLaunch"];
+    [self setMessage:sender.state==NSControlStateValueOn?@"下次启动时会显示设置窗口。":@"配置完成后，下次启动将常驻菜单栏。首次升级和需要授权时仍会显示引导。"];
+}
+- (void)useCurrentScreen:(id)sender {
+    NSScreen *screen=self.settingsWindow.screen?:NSScreen.mainScreen;
+    if(!screen)return;
+    self.profile[@"display"]=FSDisplayID(screen);[self changedGeometry];
+}
+- (void)autoFill:(id)sender {
+    if(![self requirePermission])return;
+    if(!FSScreenWithID(self.profile[@"display"])){[self setMessage:@"请先选择已连接的目标显示器。"];return;}
+    [self cancelActivation];[self finishPicking];[self resolveBindings:YES];
+    NSInteger before=self.boundCount;[self seedEmptySlots];
+    [self resetTracking:NO];[self saveConfig];
+    if(self.locked)[self applyLayout:YES];
+    [self refreshControls];[self syncDragGuard:YES];
+    [self setMessage:[NSString stringWithFormat:@"已填入 %ld 个空闲分区。%@",(long)(self.boundCount-before),self.locked?@"自动分屏继续生效。":@"当前为自由模式，点击布局后开始分屏。"]];
+}
+- (void)rotateWindows:(id)sender {
+    if(![self requirePermission])return;
+    if(!FSScreenWithID(self.profile[@"display"])){[self setMessage:@"目标显示器未连接，暂不交换位置。"];return;}
+    NSInteger count=self.zoneCount;
+    if(count<2 || self.boundCount<2){[self setMessage:@"至少选择两个窗口后，才能交换或轮换位置。"];return;}
+    [self cancelActivation];[self finishPicking];[self resolveBindings:YES];
+    NSArray *old=[self.profile[@"bindings"] copy];NSDictionary *previous=[self.runtime copy];
+    NSMutableArray *bindings=self.profile[@"bindings"];
+    for(NSInteger slot=0;slot<count;slot++) {
+        NSInteger source=(slot+count-1)%count;
+        bindings[slot]=[old[source] mutableCopy];
+        if(previous[@(source)])self.runtime[@(slot)]=previous[@(source)];
+        else [self.runtime removeObjectForKey:@(slot)];
+        [self rememberAssignment:self.runtime[@(slot)] slot:slot];
+    }
+    [self resetTracking:NO];[self saveConfig];[self applyLayout:YES];[self syncDragGuard:YES];[self refreshControls];
+}
+- (void)arrangeOnce:(id)sender {
+    if(![self requirePermission])return;
+    [self unlockLayout:nil];
+    [self resolveBindings:YES];[self seedEmptySlots];[self saveConfig];
+    [self applyLayout:YES];[self refreshControls];
+    if(!self.suspended.count)[self setMessage:@"已整理一次，当前为自由模式。窗口可自由移动，新窗口不会自动归位。"];
+}
+- (void)finishPicking {
+    if(!self.choosingWindow && !self.pickMonitor)return;
+    self.choosingWindow=NO;self.pickingGeneration++;
+    if(self.pickMonitor){[NSEvent removeMonitor:self.pickMonitor];self.pickMonitor=nil;}
+    self.quietUntil=NSDate.timeIntervalSinceReferenceDate+.4;
+}
+- (void)cancelPicking:(id)sender {
+    [self finishPicking];[self updateStatus];
+    [self setMessage:@"已取消点选，原来的窗口选择未变。"];
+}
+- (void)beginPicking:(NSButton *)sender {
+    if(![self requirePermission] || sender.tag<0 || sender.tag>=self.zoneCount)return;
+    [self cancelActivation];
+    [self finishPicking];self.choosingWindow=YES;self.pickingSlot=sender.tag;
+    self.pickingDeadline=NSDate.timeIntervalSinceReferenceDate+12;self.pickingGeneration++;
+    NSUInteger generation=self.pickingGeneration;
+    self.dragGuard.targets=@[];
+    __weak FSApp *weakSelf=self;
+    self.pickMonitor=[NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseUp handler:^(NSEvent *event) {
+        FSApp *app=weakSelf;if(!app || !app.choosingWindow || generation!=app.pickingGeneration)return;
+        CGEventRef cg=event.CGEvent;
+        NSPoint mouse=NSEvent.mouseLocation;
+        CGPoint point=cg?CGEventGetLocation(cg):CGPointMake(mouse.x,NSMaxY(NSScreen.screens.firstObject.frame)-mouse.y);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.05*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            FSApp *current=weakSelf;
+            if(!current || !current.choosingWindow || generation!=current.pickingGeneration)return;
+            if(NSDate.timeIntervalSinceReferenceDate>=current.pickingDeadline || !AXIsProcessTrusted()) {
+                [current cancelPicking:nil];return;
+            }
+            FSWindow *window=FSWindowAtPoint(point);
+            if(!window){[current setMessage:@"这里不是可调整的普通窗口。请点击目标窗口标题栏空白处，或回到定屏取消。"];return;}
+            NSInteger slot=current.pickingSlot;[current finishPicking];
+            [current bindWindow:window slot:slot];
+            [current showSettings:nil];
+        });
+    }];
+    if(!self.pickMonitor) {
+        [self finishPicking];[self setMessage:@"系统未允许点选，请用下拉列表或 ⌃⌥1–4 选择窗口。"];
+    } else [self setMessage:@"请在 12 秒内点击目标窗口的标题栏空白处。选择期间暂不自动调整窗口。"];
+    [self.documentView scrollPoint:NSMakePoint(0,0)];[self updateStatus];
+}
+
+- (BOOL)matchesPreset:(NSDictionary *)preset {
+    int kind=[self.profile[@"layout"] intValue];
+    return kind==[preset[@"layout"] intValue] &&
+           (kind==FSLayoutColumns3 || fabs([self.profile[@"ratio"] doubleValue]-[preset[@"ratio"] doubleValue])<.01);
+}
+- (void)activatePreset:(NSInteger)index {
+    if(index<0 || (NSUInteger)index>=quickPresets().count)return;
+    if(![self requirePermission]){[self refreshControls];return;}
+    NSDictionary *preset=quickPresets()[index];
+    self.profile[@"layout"]=preset[@"layout"];self.profile[@"ratio"]=preset[@"ratio"];
+    [self activateCurrentLayout:YES];
+}
+- (void)presetFromButton:(NSButton *)sender {[self activatePreset:sender.tag];}
+- (void)presetFromMenu:(NSMenuItem *)sender {[self activatePreset:[sender.representedObject integerValue]];}
+- (void)nextProfile:(id)sender {
+    if(![self requirePermission])return;
+    NSArray *profiles=self.config[@"profiles"];
+    NSUInteger index=[profiles indexOfObjectIdenticalTo:self.profile];
+    NSUInteger next=index==NSNotFound?0:(index+1)%profiles.count;
+    self.locked=YES;[self switchProfile:profiles[next][@"id"]];
+}
+- (void)lockModeChanged:(NSPopUpButton *)sender {
+    if(self.refreshing)return;
+    self.profile[@"preventDrag"]=@(sender.indexOfSelectedItem==1);
+    [self saveConfig];[self syncDragGuard:YES];[self refreshControls];
+    if(![self requirePermission])return;
+    if(!self.locked)[self setMessage:@"拖动规则已保存。点击任一分屏布局即可生效。"];
+    else if([self.profile[@"preventDrag"] boolValue] && self.dragGuard.running)
+        [self setMessage:@"已阻止分区窗口的标题栏拖动，内容区仍可拖拽；选「自由模式」可自由移动。"];
+    else if(![self.profile[@"preventDrag"] boolValue])[self setMessage:@"已切换为松手回位，可以拖动窗口，松手后恢复布局。"];
+}
+- (void)toggleDragMode:(id)sender {
+    self.profile[@"preventDrag"]=@(![self.profile[@"preventDrag"] boolValue]);
+    [self saveConfig];[self syncDragGuard:YES];[self refreshControls];
+    if(!AXIsProcessTrusted())[self requirePermission];
+}
+- (void)refreshDragTargets {
+    if(!self.dragGuard.running || !self.locked || _placement.switching || ![self.profile[@"preventDrag"] boolValue] ||
+       !FSScreenWithID(self.profile[@"display"]) || !AXIsProcessTrusted()) {self.dragGuard.targets=@[];return;}
+    NSArray *visible=FSOnScreenRows();NSMutableArray *targets=[NSMutableArray new];
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *window=self.runtime[@(i)];FSRect frame;
+        if(!window || [self.suspended containsIndex:i] || ![window isUsable] ||
+           ![window readFrame:&frame] || ![window isOnScreen:visible])continue;
+        FSDragTarget *target=[FSDragTarget new];target.window=window;target.frame=frame;[targets addObject:target];
+    }
+    self.dragGuard.targets=targets;
+}
+- (void)syncDragGuard:(BOOL)retry {
+    if(!self.locked || _placement.switching || ![self.profile[@"preventDrag"] boolValue] || !AXIsProcessTrusted() ||
+       !FSScreenWithID(self.profile[@"display"])) {
+        self.dragGuard.targets=@[];
+        /* Finish a swallowed mouse sequence before removing the event tap. */
+        if(!CGEventSourceButtonState(kCGEventSourceStateHIDSystemState,kCGMouseButtonLeft))[self.dragGuard stop];
+    } else if(!self.dragGuard.running && (retry || !self.dragGuard.faulted)) {
+        NSString *error=nil;
+        if(![self.dragGuard start:&error])[self setMessage:[NSString stringWithFormat:@"禁止拖动未生效：%@。当前使用松手回位。",error]];
+    }
+    [self refreshDragTargets];[self updateStatus];
+}
+
+- (void)changedGeometry {
+    [self cancelActivation];
+    [self resetTracking:NO];[self saveConfig];[self refreshControls];
+    self.quietUntil=NSDate.timeIntervalSinceReferenceDate+.65;
+    [self setMessage:self.locked?@"布局已保存，松开鼠标后应用新尺寸。":@"布局已保存。当前为自由模式，点「启用当前布局」开始分屏。"];
+}
+- (void)layoutChanged:(NSPopUpButton *)sender {
+    if(self.refreshing)return;
+    if(![self requirePermission]){[self refreshControls];return;}
+    self.profile[@"layout"]=@(sender.indexOfSelectedItem);[self activateCurrentLayout:YES];
+}
+- (void)screenChanged:(NSPopUpButton *)sender {if(self.refreshing)return;self.profile[@"display"]=sender.selectedItem.representedObject;[self changedGeometry];}
+- (void)ratioChanged:(NSSlider *)sender {if(self.refreshing)return;self.profile[@"ratio"]=@(round(sender.doubleValue)/100.0);[self changedGeometry];}
+- (void)gapChanged:(NSSlider *)sender {if(self.refreshing)return;self.profile[@"gap"]=@(round(sender.doubleValue));[self changedGeometry];}
+- (void)switchProfile:(NSString *)identifier {
+    if(![self requirePermission]){[self refreshControls];return;}
+    BOOL found=NO;for(NSDictionary *p in self.config[@"profiles"])if([p[@"id"] isEqual:identifier]){found=YES;break;}
+    if(!found)return;
+    self.runtimeCache[self.profile[@"id"]]=[self.runtime copy];
+    [self cancelActivation];[self resetTracking:YES];
+    self.config[@"active"]=identifier;
+    self.runtime=[self.runtimeCache[identifier] mutableCopy]?:[NSMutableDictionary new];
+    _placement.lastSlot=0;self.locked=YES;
+    [self saveConfig];
+    if(!FSScreenWithID(self.profile[@"display"])) {
+        [self setMessage:@"方案已选择，目标显示器未连接。请连接显示器或选择当前屏幕。"];
+        [self syncDragGuard:NO];[self refreshControls];return;
+    }
+    [self activateCurrentLayout:YES];
+}
+- (void)profileChanged:(NSPopUpButton *)sender {if(!self.refreshing)[self switchProfile:sender.selectedItem.representedObject];}
+- (void)profileFromMenu:(NSMenuItem *)sender {
+    if(![self requirePermission])return;
+    self.locked=YES;[self switchProfile:sender.representedObject];
+}
+- (NSString *)askName:(NSString *)title initial:(NSString *)initial {
+    [self cancelActivation];[self finishPicking];
+    NSAlert *alert=[NSAlert new];alert.messageText=title;alert.informativeText=@"例如：剪辑、写作、浏览器＋文件夹。";
+    NSTextField *input=[[NSTextField alloc] initWithFrame:NSMakeRect(0,0,280,26)];input.stringValue=initial;
+    alert.accessoryView=input;[alert addButtonWithTitle:@"保存"];[alert addButtonWithTitle:@"取消"];
+    [NSApp activateIgnoringOtherApps:YES];[alert.window setInitialFirstResponder:input];
+    if([alert runModal]!=NSAlertFirstButtonReturn)return nil;
+    NSString *name=[input.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return name.length?[name substringToIndex:MIN((NSUInteger)48,name.length)]:nil;
+}
+- (void)duplicateProfile:(id)sender {
+    NSString *name=[self askName:@"另存为新的布局方案" initial:[self.profile[@"name"] stringByAppendingString:@" 副本"]];if(!name)return;
+    NSData *data=[NSJSONSerialization dataWithJSONObject:self.profile options:0 error:nil];
+    NSMutableDictionary *p=[NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
+    self.runtimeCache[self.profile[@"id"]]=[self.runtime copy];
+    p[@"id"]=NSUUID.UUID.UUIDString;p[@"name"]=name;[self.config[@"profiles"] addObject:p];
+    self.config[@"active"]=p[@"id"];
+    for(int slot=0;slot<4;slot++)[self rememberAssignment:self.runtime[@(slot)] slot:slot];
+    [self saveConfig];[self refreshControls];[self setMessage:@"已另存为新方案，当前窗口位置和模式保持不变。"];
+}
+- (void)renameProfile:(id)sender {NSString *name=[self askName:@"重命名方案" initial:self.profile[@"name"]];if(name){self.profile[@"name"]=name;[self saveConfig];[self refreshControls];}}
+- (void)deleteProfile:(id)sender {
+    [self cancelActivation];[self finishPicking];
+    NSMutableArray *profiles=self.config[@"profiles"];
+    if(profiles.count<=1){[self setMessage:@"至少保留一个布局方案。可以直接修改当前方案。"];return;}
+    NSAlert *alert=[NSAlert new];alert.messageText=[NSString stringWithFormat:@"删除方案「%@」？",self.profile[@"name"]];
+    alert.informativeText=@"仅删除这个布局方案，应用窗口不会关闭。";[alert addButtonWithTitle:@"删除"];[alert addButtonWithTitle:@"取消"];
+    if([alert runModal]!=NSAlertFirstButtonReturn)return;
+    NSString *removed=self.profile[@"id"];
+    [profiles removeObject:self.profile];[self.runtimeCache removeObjectForKey:removed];[self.histories removeObjectForKey:removed];
+    self.config[@"active"]=profiles.firstObject[@"id"];
+    [self resetTracking:YES];self.runtime=[self.runtimeCache[self.profile[@"id"]] mutableCopy]?:[NSMutableDictionary new];
+    [self unlockLayout:nil];[self refreshWindowList:nil];
+    [self setMessage:@"方案已删除，已回到自由模式。选择布局即可重新开始。"];
+}
+
+- (void)bindWindow:(FSWindow *)window slot:(NSInteger)slot {
+    if(slot<0 || slot>=self.zoneCount)return;
+    [self cancelActivation];[self storeWindow:window slot:slot];_placement.lastSlot=(int)slot;
+    [self resetTracking:NO];[self saveConfig];
+    if(self.locked && window)[self arrangeSlot:slot manual:YES];
+    [self refreshControls];[self syncDragGuard:YES];
+    if(![self.suspended containsIndex:slot])[self setMessage:window?[NSString stringWithFormat:@"%@ 已放入区域 %ld。%@",window.appName,(long)slot+1,self.locked?@"":@"自由模式中只保存选择，尚未移动。"]:@"分区已清空，原窗口仍然打开。"];
+}
+- (void)bindingChanged:(NSPopUpButton *)sender {
+    if(self.refreshing)return;
+    id value=sender.selectedItem.representedObject;
+    if([value isKindOfClass:FSWindow.class])[self bindWindow:value slot:sender.tag];
+    else if(!value)[self bindWindow:nil slot:sender.tag];
+}
+- (void)bindFromMenu:(NSMenuItem *)sender {[self bindFocusedSlot:[sender.representedObject integerValue]];}
+- (void)bindFocusedSlot:(NSInteger)slot {
+    if(slot>=self.zoneCount){[self setMessage:@"当前布局没有这个区域，请先在设置中切换布局。"];NSBeep();return;}
+    if(![self requirePermission])return;
+    pid_t pid=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    FSWindow *window=FSFocusedWindow(pid==getpid()?self.lastExternalPID:pid);
+    if(!window){[self setMessage:@"未找到可调整的当前窗口。请先点击一个普通窗口，再按 ⌃⌥1–4 选择它。"];NSBeep();return;}
+    [self bindWindow:window slot:slot];
+}
+
+- (void)resolveBindings:(BOOL)force {[self resolveBindings:force available:nil];}
+- (void)resolveBindings:(BOOL)force available:(NSArray<FSWindow *> *)available {
+    NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    BOOL missing=NO;
+    for(int i=0;i<self.zoneCount;i++) {
+        FSWindow *w=self.runtime[@(i)];FSRect r;
+        if(w && (![w readFrame:&r] || ![NSRunningApplication runningApplicationWithProcessIdentifier:w.pid]))[self.runtime removeObjectForKey:@(i)];
+        if(!self.runtime[@(i)] && [self.profile[@"bindings"][i][@"bundle"] length])missing=YES;
+    }
+    if(!force && (!missing || now-self.lastResolve<4))return;
+    self.lastResolve=now;
+    NSArray<FSWindow *> *windows=available?:FSAvailableWindows();
+    NSMutableArray *used=[NSMutableArray arrayWithArray:self.runtime.allValues];
+    for(int i=0;i<self.zoneCount;i++) {
+        if(self.runtime[@(i)])continue;
+        NSDictionary *b=self.profile[@"bindings"][i];if(!b[@"bundle"])continue;
+        NSMutableArray *exact=[NSMutableArray new];
+        for(FSWindow *w in windows) {
+            if(![w.bundleID isEqual:b[@"bundle"]])continue;
+            BOOL occupied=NO;for(FSWindow *other in used)if([w sameWindow:other]){occupied=YES;break;}
+            if(occupied)continue;if([w.title isEqual:b[@"title"]])[exact addObject:w];
+        }
+        FSWindow *chosen=nil;
+        if(exact.count==1)chosen=exact.firstObject;
+        /* A closed window must not silently turn into another window of its app. */
+        if(chosen){self.runtime[@(i)]=chosen;[used addObject:chosen];[self rememberAssignment:chosen slot:i];}
+    }
+}
+- (void)rememberOriginal:(FSWindow *)window frame:(FSRect)frame {
+    for(FSRestore *r in self.originals)if([r.window sameWindow:window])return;
+    FSRestore *r=[FSRestore new];r.window=window;r.frame=frame;[self.originals addObject:r];
+}
+- (void)arrangeSlot:(NSInteger)slot manual:(BOOL)manual {
+    if(!AXIsProcessTrusted())return;
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);if(!screen)return;
+    FSRect zones[4];int count=FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(screen),[self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones);
+    if(slot<0 || slot>=count)return;
+    [self resolveBindings:manual];
+    [self moveSlot:slot to:zones[slot] visible:FSOnScreenRows() manual:manual];
+}
+- (BOOL)moveSlot:(NSInteger)slot to:(FSRect)target visible:(NSArray *)visible manual:(BOOL)manual {
+    if([self.pending containsIndex:slot] || (!manual && [self.suspended containsIndex:slot]))return NO;
+    FSWindow *window=self.runtime[@(slot)];FSRect current;
+    if(!window || ![window isUsable] || ![window isOnScreen:visible] || ![window readFrame:&current])return NO;
+    if(FSRectNear(current,target,3))return YES;
+    if(self.targets[@(slot)] && !FSRectNear(fsrect(self.targets[@(slot)].rectValue),target,1))self.failures[@(slot)]=@0;
+    self.targets[@(slot)]=[NSValue valueWithRect:nsrect(target)];
+    [self rememberOriginal:window frame:current];
+    NSString *error=nil;
+    if(![window moveTo:target error:&error]) {
+        [self.suspended addIndex:slot];[self setMessage:[NSString stringWithFormat:@"区域 %ld：%@；已暂停此窗口的自动调整。",(long)slot+1,error]];return NO;
+    }
+    [self.pending addIndex:slot];
+    NSUInteger epoch=self.epoch;
+    __weak FSApp *weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.55*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        FSApp *app=weakSelf;if(!app || app.epoch!=epoch)return;
+        [app.pending removeIndex:slot];FSRect actual;
+        if(![window readFrame:&actual])return;
+        if(FSRectNear(actual,target,4)) {app.failures[@(slot)]=@0;return;}
+        int attempts=[app.failures[@(slot)] intValue]+1;app.failures[@(slot)]=@(attempts);
+        if(attempts>=2 || manual) {
+            [app.suspended addIndex:slot];
+            [app refreshDragTargets];
+            [app setMessage:[NSString stringWithFormat:@"区域 %ld：%@ 未达到指定大小，可能受最小尺寸限制。此窗口已暂停自动调整，请增大分区后重试。",(long)slot+1,window.appName]];
+        }
+    });
+    return YES;
+}
+- (void)applyLayout:(BOOL)manual {
+    if(!manual && !self.locked)return;
+    if(!AXIsProcessTrusted()){if(manual)[self requirePermission];return;}
+    NSScreen *screen=FSScreenWithID(self.profile[@"display"]);
+    if(!screen){self.dragGuard.targets=@[];[self setMessage:@"目标显示器未连接：已暂停该方案的窗口调整。连接显示器或重新选择目标显示器后继续。"];return;}
+    FSRect usable=FSUsableFrame(screen),zones[4];
+    if(self.lastUsable && !FSRectNear(fsrect(self.lastUsable.rectValue),usable,1))[self resetTracking:NO];
+    self.lastUsable=[NSValue valueWithRect:nsrect(usable)];
+    int count=FSBuildZones([self.profile[@"layout"] intValue],usable,[self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones);
+    [self resolveBindings:manual];NSArray *visible=FSOnScreenRows();
+    int bound=0,processed=0;
+    for(int i=0;i<count;i++) {
+        if(self.profile[@"bindings"][i][@"bundle"])bound++;
+        if([self moveSlot:i to:zones[i] visible:visible manual:manual])processed++;
+    }
+    if(manual && self.suspended.count==0) {
+        if(!bound)[self setMessage:self.locked?@"自动分屏已开启，打开或切换目标屏幕上的窗口即可归位。":@"当前为自由模式。点击布局开始分屏。"]; 
+        else [self setMessage:[NSString stringWithFormat:@"已处理 %d / %d 个窗口。%@",processed,bound,self.locked?@"自动归位和固定已开启；选「自由模式」可停止。":@"自由模式中可随意拖动。"]];
+    }
+    [self refreshDragTargets];
+}
+- (void)applyNow:(id)sender {[self activateCurrentLayout:YES];}
+- (void)fixLayout:(id)sender {[self activateCurrentLayout:YES];}
+- (void)unlockLayout:(id)sender {
+    /* Always available, even with no permission or an unplugged display. */
+    [self cancelActivation];self.locked=NO;[self.focusObserver stop];
+    [self resetTracking:NO];[self saveConfig];
+    [self setMessage:@"自由模式：已停止自动归位和固定，窗口保留当前位置。点击任一布局可重新开始。"];
+    [self syncDragGuard:NO];[self refreshControls];[self updateStatus];
+}
+- (void)toggleLock:(id)sender {
+    if(self.locked)[self unlockLayout:sender];
+    else [self fixLayout:sender];
+}
+- (void)tick:(NSTimer *)timer {
+    [self updateStatus];
+    NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    if(self.choosingWindow) {
+        if(now>=self.pickingDeadline || !AXIsProcessTrusted()) {
+            [self finishPicking];[self updateStatus];[self setMessage:@"点选已结束，原选择未变。"];
+        }
+        return;
+    }
+    BOOL trusted=AXIsProcessTrusted();
+    if(trusted!=self.lastTrusted && !self.menuOpen && !NSApp.modalWindow) {
+        self.lastTrusted=trusted;
+        if(!trusted){[self cancelActivation];[self.focusObserver stop];}
+        if(self.settingsWindow.visible)[self refreshWindowList:nil];
+    }
+    if(!self.locked || ![self.profile[@"preventDrag"] boolValue] || !trusted)[self syncDragGuard:NO];
+    if(CGEventSourceButtonState(kCGEventSourceStateHIDSystemState,kCGMouseButtonLeft) || NSEvent.pressedMouseButtons!=0){self.lastMouseDown=now;return;}
+    if(!self.locked || _placement.switching || self.sleeping || self.sessionInactive || self.menuOpen ||
+       NSApp.modalWindow || now<self.quietUntil || now-self.lastMouseDown<.3 || !trusted)return;
+    [self captureActiveWindow];
+    if(now-self.lastMaintenance>=.85) {
+        self.lastMaintenance=now;[self applyLayout:NO];
+        if([self.profile[@"preventDrag"] boolValue] && !self.dragGuard.running && !self.dragGuard.faulted)[self syncDragGuard:NO];
+    }
+}
+- (void)restoreOriginals:(id)sender {
+    [self unlockLayout:nil];
+    if(![self requirePermission])return;
+    NSArray *visible=FSOnScreenRows();NSMutableArray *remaining=[NSMutableArray new];int restored=0;
+    for(FSRestore *entry in self.originals) {
+        FSRect f;if(![entry.window readFrame:&f])continue;
+        if(![entry.window isUsable] || ![entry.window isOnScreen:visible]){[remaining addObject:entry];continue;}
+        NSString *error=nil;
+        if([entry.window moveTo:entry.frame error:&error])restored++;
+        else [remaining addObject:entry];
+    }
+    self.originals=remaining;
+    [self setMessage:[NSString stringWithFormat:@"已进入自由模式，已向 %d 个窗口发送恢复请求。%lu 个暂不可用的窗口可稍后再恢复。",restored,(unsigned long)remaining.count]];
+    [self updateStatus];
+}
+- (BOOL)requirePermission {
+    if(AXIsProcessTrusted())return YES;
+    /* Denied operations must never launch Settings, activate our window or prompt. */
+    [self setMessage:@"当前程序未获辅助功能授权，操作已暂停。请手动点击「打开权限设置」；如果系统开关已开，先查看「权限诊断」中的应用路径。"];
+    [self updateStatus];
+    return NO;
+}
+- (void)openPermission:(id)sender {
+    [self cancelActivation];
+    [self finishPicking];
+    /* Only an explicit menu/button action reaches this method. Open one surface. */
+    BOOL opened=[NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
+    [self setMessage:opened?@"请为当前这份定屏开启辅助功能。列表中没有时，用 + 添加「权限诊断」显示的应用路径；完成后返回并点击「更新窗口列表」。":@"未能打开设置。请手动前往「系统设置 → 隐私与安全性 → 辅助功能」。"];
+}
+- (void)revealCurrentApp:(id)sender {
+    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[NSBundle.mainBundle.bundleURL]];
+}
+- (void)showPermissionDiagnostics:(id)sender {
+    [self cancelActivation];
+    [self finishPicking];
+    BOOL trusted=AXIsProcessTrusted();
+    NSBundle *bundle=NSBundle.mainBundle;
+    NSString *diagnostic=[NSString stringWithFormat:
+        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
+        FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
+        trusted?@"已授权":@"未授权",bundle.bundleIdentifier?:@"未知",bundle.bundlePath,
+        trusted?@"当前进程已获得授权。如果窗口仍无法调整，请刷新窗口，并检查目标窗口是否全屏、最小化或受最小尺寸限制。":
+        @"若系统开关已经开启，可能对应旧版本或其他副本。先在 Finder 中确认上面的应用位置，然后退出定屏，仅移除辅助功能列表中的定屏条目，用 + 重新添加这份应用并开启，再重新启动。"];
+    NSAlert *alert=[NSAlert new];alert.messageText=@"定屏 · 权限诊断";alert.informativeText=diagnostic;
+    [alert addButtonWithTitle:@"关闭"];[alert addButtonWithTitle:@"在 Finder 中显示"];[alert addButtonWithTitle:@"复制诊断"];
+    [NSApp activateIgnoringOtherApps:YES];
+    NSModalResponse result=[alert runModal];
+    if(result==NSAlertSecondButtonReturn)[self revealCurrentApp:nil];
+    else if(result==NSAlertThirdButtonReturn) {
+        [NSPasteboard.generalPasteboard clearContents];
+        [NSPasteboard.generalPasteboard setString:diagnostic forType:NSPasteboardTypeString];
+        [self setMessage:@"权限诊断已复制，可粘贴反馈。"];
+    }
+}
+- (void)openConfigFolder:(id)sender {
+    [[NSFileManager defaultManager] createDirectoryAtURL:self.configURL.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+    [NSWorkspace.sharedWorkspace openURL:self.configURL.URLByDeletingLastPathComponent];
+}
+- (void)openLoginSettings:(id)sender {
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.LoginItems-Settings.extension"]];
+    [self setMessage:@"在「通用 → 登录项与扩展」的「登录时打开」中添加「定屏」。"];
+}
+- (void)showHelp:(id)sender {
+    [self cancelActivation];[self finishPicking];
+    NSAlert *alert=[NSAlert new];alert.messageText=@"选择模式，窗口自动归位";
+    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和固定，保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用布局，把已选窗口排好并带到前台；空分区从目标屏幕已有窗口中补充。恢复可用的最小化窗口，不自动启动已关闭的应用。\n\n以后激活窗口\n之前用过的窗口回原分区；新窗口优先填空位；满了则进入最近使用的分区，原窗口留在后面。黑框表示最近使用的分区，也可点击预览指定。\n\n固定规则\n默认拖走后松手回位，也可选择阻止标题栏拖动。自由模式下两者都停止。\n\n保存的方案\n记录各自的布局、显示器和当前窗口组合。修改自动保存；通过「管理方案」另存、改名。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置。不会关闭任何窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
+    [alert addButtonWithTitle:@"知道了"];[alert addButtonWithTitle:@"完整说明"];
+    [NSApp activateIgnoringOtherApps:YES];
+    if([alert runModal]==NSAlertSecondButtonReturn) {
+        NSURL *url=[NSBundle.mainBundle URLForResource:@"使用说明" withExtension:@"md"];
+        if(url)[NSWorkspace.sharedWorkspace openURL:url];
+    }
+}
+- (void)quit:(id)sender {[NSApp terminate:nil];}
+@end
+
+int main(int argc,const char *argv[]) {
+    @autoreleasepool {
+        NSApplication *application=NSApplication.sharedApplication;
+        [application setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        static FSApp *delegate;
+        delegate=[FSApp new];application.delegate=delegate;
+        [application run];
+    }
+    return 0;
+}
