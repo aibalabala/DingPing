@@ -124,7 +124,9 @@ int FSDropDestination(const FSRect zones[4],int count,int source,
 FSDropAction FSDropChooseAction(int count,int source,int target,unsigned pinned,bool targetOccupied) {
     if(count<1 || count>4 || source<-1 || source>=count || target<0 || target>=count || source==target)
         return FSDropIgnore;
-    if((pinned & (1u<<target)) || (source>=0 && (pinned & (1u<<source))))return FSDropBlocked;
+    /* A deliberate move between managed zones can exchange fixed targets.
+       An unassigned window has nowhere to move a displaced fixed owner. */
+    if(source<0 && (pinned & (1u<<target)))return FSDropBlocked;
     if(!targetOccupied)return FSDropMove;
     return source>=0?FSDropSwap:FSDropReplace;
 }

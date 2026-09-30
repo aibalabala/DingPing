@@ -6,7 +6,7 @@ system_app=/Applications/定屏.app
 bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$system_app/Contents/Info.plist" 2>/dev/null || true)"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$system_app/Contents/Info.plist" 2>/dev/null || true)"
 build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$system_app/Contents/Info.plist" 2>/dev/null || true)"
-if [[ "$bundle_id" != local.dingping.fixedsplit || "$version" != 0.7.0 || "$build" != 18 ]] ||
+if [[ "$bundle_id" != local.dingping.fixedsplit || "$version" != 0.7.1 || "$build" != 19 ]] ||
    ! /usr/bin/codesign --verify --deep --strict "$system_app" >/dev/null 2>&1; then
   echo '安装后的定屏完整性检查失败；旧版备份保留在用户 Library/Application Support/定屏/Backups。' >&2
   exit 1

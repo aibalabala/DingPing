@@ -11,8 +11,8 @@ if [[ $# -gt 0 ]]; then
 fi
 
 bundle_id=local.dingping.fixedsplit
-expected_version=0.7.0
-expected_build=18
+expected_version=0.7.1
+expected_build=19
 target_app="$HOME/Applications/定屏.app"
 system_app=/Applications/定屏.app
 if [[ -d "$system_app" && ! -L "$system_app" &&
@@ -59,7 +59,7 @@ running_pids() {
 echo '定屏 · 只修复当前版本的辅助功能授权'
 printf '准确位置：%s\n' "$target_app"
 if ! verify_current; then
-  echo '未找到已验证的 v0.7.0（构建 18），不重置旧版权限。请先从本 DMG 安装。'
+  echo '未找到已验证的 v0.7.1（构建 19），不重置旧版权限。请先从本 DMG 安装。'
   exit 3
 fi
 expected_hash="$(cdhash)"
@@ -120,5 +120,5 @@ fi
 echo ''
 echo '[3/3] 启动经过验证的准确路径'
 /usr/bin/open -n -a "$target_app"
-echo '请在新打开的定屏里看「权限诊断」：版本 0.7.0（构建 18），辅助功能检测应为已授权。'
+echo '请在新打开的定屏里看「权限诊断」：版本 0.7.1（构建 19），辅助功能检测应为已授权。'
 echo '若仍显示未授权，请复制权限诊断与本日志；不要重置其他应用或系统全局权限。'

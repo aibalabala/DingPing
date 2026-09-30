@@ -88,10 +88,22 @@ int main(void) {
     assert(FSDropChooseAction(2,0,1,0,true)==FSDropSwap);
     assert(FSDropChooseAction(2,0,1,0,false)==FSDropMove);
     assert(FSDropChooseAction(2,-1,1,0,true)==FSDropReplace);
-    assert(FSDropChooseAction(2,0,1,1u<<0,true)==FSDropBlocked);
-    assert(FSDropChooseAction(2,0,1,1u<<1,true)==FSDropBlocked);
+    assert(FSDropChooseAction(2,0,1,1u<<0,true)==FSDropSwap);
+    assert(FSDropChooseAction(2,0,1,1u<<1,true)==FSDropSwap);
+    assert(FSDropChooseAction(2,0,1,3u,true)==FSDropSwap);
+    assert(FSDropChooseAction(2,0,1,1u<<0,false)==FSDropMove);
+    assert(FSDropChooseAction(2,-1,1,1u<<1,true)==FSDropBlocked);
     assert(FSDropChooseAction(2,0,0,0,true)==FSDropIgnore);
     assert(FSDropChooseAction(2,0,-1,0,false)==FSDropIgnore);
-    puts("PASS: drag pairing, window movement, springback title intent, drop targets, pin-safe swap.");
+    /* User's three-zone layout: horizontal swaps involving the fixed left
+       Chrome are as deliberate as the already-working right-side vertical swap. */
+    FSRect three[4]={{74,38,1235,1394},{1317,38,1235,693},{1317,739,1235,693},{0,0,0,0}};
+    int target=FSDropDestination(three,3,1,600,300,(FSRect){300,100,1235,693});
+    assert(target==0 && FSDropChooseAction(3,1,target,1u,true)==FSDropSwap);
+    target=FSDropDestination(three,3,0,1900,300,(FSRect){1400,100,1235,1394});
+    assert(target==1 && FSDropChooseAction(3,0,target,1u,true)==FSDropSwap);
+    target=FSDropDestination(three,3,1,1900,1000,(FSRect){1317,739,1235,693});
+    assert(target==2 && FSDropChooseAction(3,1,target,1u,true)==FSDropSwap);
+    puts("PASS: drag pairing, movement, drop targets, horizontal/vertical manual pin swaps, unknown-source protection.");
     return 0;
 }

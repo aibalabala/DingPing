@@ -10,7 +10,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.7.0";
+static NSString *const FSVersion=@"0.7.1";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -165,18 +165,20 @@ static NSImage *layoutIcon(NSDictionary *preset) {
         NSRect r=NSInsetRect(self.zoneRects[i].rectValue,5,5);
         if(r.size.width<=12 || r.size.height<=12)continue;
         BOOL targetPinned=(self.pinnedMask & (1u<<i))!=0;
-        BOOL fixed=self.sourcePinned || targetPinned;
+        BOOL blocked=(self.sourcePinned && self.sourceSlot<0) ||
+                     (targetPinned && self.sourceSlot<0);
         BOOL selected=(NSInteger)i==self.targetSlot;
-        NSColor *color=fixed?NSColor.systemOrangeColor:NSColor.systemTealColor;
+        NSColor *color=blocked?NSColor.systemOrangeColor:NSColor.systemTealColor;
         NSBezierPath *outline=[NSBezierPath bezierPathWithRoundedRect:r xRadius:12 yRadius:12];
         [[color colorWithAlphaComponent:selected ? .23 : .075] setFill];[outline fill];
         [[color colorWithAlphaComponent:selected ? .95 : .55] setStroke];
         outline.lineWidth=selected?4:2;[outline stroke];
-        NSString *caption=targetPinned?[NSString stringWithFormat:@"%lu · 已固定",(unsigned long)i+1]:
-            (self.sourcePinned?[NSString stringWithFormat:@"%lu · 来源已固定",(unsigned long)i+1]:
-            (selected?[NSString stringWithFormat:@"松手放到区域 %lu",(unsigned long)i+1]:
-             ((NSInteger)i==self.sourceSlot?[NSString stringWithFormat:@"当前区域 %lu",(unsigned long)i+1]:
-              [NSString stringWithFormat:@"区域 %lu",(unsigned long)i+1])));
+        NSString *caption=blocked?[NSString stringWithFormat:@"%lu · 先分配再换位",(unsigned long)i+1]:
+            (selected?[NSString stringWithFormat:@"松手换到 %lu%@",(unsigned long)i+1,
+                (self.sourcePinned || targetPinned)?@" · 固定跟随":@""]:
+             ((NSInteger)i==self.sourceSlot?[NSString stringWithFormat:@"当前区域 %lu%@",(unsigned long)i+1,
+                self.sourcePinned?@" · 已固定":@""]:
+              [NSString stringWithFormat:@"区域 %lu%@",(unsigned long)i+1,targetPinned?@" · 可交换固定窗":@""]));
         NSRect badge=NSMakeRect(NSMinX(r)+12,NSMinY(r)+12,MIN(NSWidth(r)-24,168),30);
         if(badge.size.width<60)continue;
         [[color colorWithAlphaComponent:.93] setFill];
@@ -871,9 +873,9 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     FSDropAction action=FSDropChooseAction(count,source,destination,pinned,occupant!=nil);
     if(action==FSDropIgnore){self.lastDragResult=@"窗口仍在原分区；把窗口拖到目标分区再松手";return;}
     if(action==FSDropBlocked) {
-        self.lastDragResult=@"目标分区或来源窗口已固定，未换位";
+        self.lastDragResult=@"来源窗口尚未分配到区域，无法交换目标固定窗口";
         [window moveTo:start error:nil];
-        [self setMessage:@"固定的窗口或分区不能拖动换位；请先取消「固定此窗口」。"];
+        [self setMessage:@"先将这个窗口放入一个区域，再拖动交换固定窗口；固定状态会跟随换位。"];
         return;
     }
     if(action==FSDropSwap && (![occupant isUsable] || ![occupant isOnScreen:FSOnScreenRows()])) {
@@ -886,8 +888,31 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(action==FSDropSwap) {
         FSRect previous;if([occupant readFrame:&previous])[self rememberOriginal:occupant frame:previous];
     }
-    [self storeWindow:window slot:destination];
-    if(action==FSDropSwap)[self storeWindow:occupant slot:source];
+    BOOL pinsChanged=source>=0 && ([self slotPinned:source] || [self slotPinned:destination]);
+    if(source>=0) {
+        BOOL sourceBorrowed=[self.borrowedSlots containsIndex:source];
+        BOOL destinationBorrowed=[self.borrowedSlots containsIndex:destination];
+        /* The user changes this arrangement explicitly. Swap fixed targets
+           together with occupants, including any temporarily absent target,
+           so no saved pin can be erased by the exchange. */
+        if(!FSProfileExchangeSlots(self.profile,source,destination))return;
+        self.runtime[@(destination)]=window;
+        if(action==FSDropSwap)self.runtime[@(source)]=occupant;
+        else [self.runtime removeObjectForKey:@(source)];
+        [self.borrowedSlots removeIndex:source];[self.borrowedSlots removeIndex:destination];
+        if(sourceBorrowed && [self slotPinned:destination])[self.borrowedSlots addIndex:destination];
+        if(action==FSDropSwap && destinationBorrowed && [self slotPinned:source])[self.borrowedSlots addIndex:source];
+        /* This deliberate rearrangement also refreshes the identifiable title
+           or document of each present fixed owner for the next launch. */
+        if([self slotPinned:destination] && !sourceBorrowed)
+            FSProfileSetPin(self.profile,destination,FSWindowBinding(window));
+        if(action==FSDropSwap && [self slotPinned:source] && !destinationBorrowed)
+            FSProfileSetPin(self.profile,source,FSWindowBinding(occupant));
+        FSProfileSetOccupant(self.profile,destination,FSWindowBinding(window));
+        FSProfileSetOccupant(self.profile,source,action==FSDropSwap?FSWindowBinding(occupant):@{});
+        [self rememberAssignment:window slot:destination];
+        if(action==FSDropSwap)[self rememberAssignment:occupant slot:source];
+    } else [self storeWindow:window slot:destination];
     self.focusGeneration++;self.observedWindow=window;_placement.lastSlot=destination;
     self.epoch++;[self.pending removeAllIndexes];
     [self.suspended removeIndex:destination];[self.failures removeObjectForKey:@(destination)];
@@ -903,8 +928,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         return;
     }
     NSString *detail=action==FSDropSwap?@"已与原窗口交换":action==FSDropReplace?@"原窗口仍保持打开":@"已移动";
-    self.lastDragResult=[NSString stringWithFormat:@"已换到区域 %d（%@）",destination+1,
-                         pointerOnly?@"标题栏落点":@"窗口位移"];
+    self.lastDragResult=[NSString stringWithFormat:@"已换到区域 %d（%@%@）",destination+1,
+                         pointerOnly?@"标题栏落点":@"窗口位移",pinsChanged?@"；固定位置同步更新":@""];
     [self setMessage:[NSString stringWithFormat:@"%@ → 区域 %d · %@。",window.appName,destination+1,detail]];
 }
 - (void)scheduleAutomaticPlacement {
@@ -1324,12 +1349,12 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         pick.tag=i;pick.toolTip=@"12 秒内点击目标窗口标题栏空白处。";[v addSubview:pick];[self.pickButtons addObject:pick];
         NSButton *pin=[NSButton checkboxWithTitle:@"固定此窗口" target:self action:@selector(togglePin:)];
         pin.frame=NSMakeRect(813,y+2,143,25);pin.tag=i;
-        pin.toolTip=@"保存固定目标；目标暂时不在时允许临时补位，回来后自动收回。";
+        pin.toolTip=@"新窗口不会自动挤占；手动拖放可换位并更新固定位置。目标暂缺时允许临时补位。";
         [v addSubview:pin];[self.pinButtons addObject:pin];
     }
     [v addSubview:label(@"拖动规则",NSMakeRect(26,568,114,22),11,YES)];
     self.lockModePopup=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(139,565,284,29) pullsDown:NO];
-    [self.lockModePopup addItemsWithTitles:@[@"拖到分区换位",@"阻止标题栏拖动"]];
+    [self.lockModePopup addItemsWithTitles:@[@"拖到分区换位（固定跟随）",@"阻止标题栏拖动"]];
     self.lockModePopup.target=self;self.lockModePopup.action=@selector(lockModeChanged:);[v addSubview:self.lockModePopup];
     self.guardStatusLabel=label(@"",NSMakeRect(434,570,254,19),11,NO);[v addSubview:self.guardStatusLabel];
     self.moreButton=button(@"更多设置 →",NSMakeRect(755,562,201,33),self,@selector(toggleMore:));
@@ -1440,7 +1465,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(!self.locked)self.guardStatusLabel.stringValue=@"自由模式 · 不固定窗口";
     else if(!trusted || !connected)self.guardStatusLabel.stringValue=@"条件未就绪 · 暂停调整";
     else if(self.choosingWindow || _placement.switching)self.guardStatusLabel.stringValue=@"操作期间暂不拦截拖动";
-    else if(![self.profile[@"preventDrag"] boolValue])self.guardStatusLabel.stringValue=@"拖动标题栏到其他分区可换位";
+    else if(![self.profile[@"preventDrag"] boolValue])self.guardStatusLabel.stringValue=@"手动拖放可换位，固定位置跟随";
     else self.guardStatusLabel.stringValue=self.dragGuard.running?@"自动分屏 · 阻止标题栏拖动":@"标题栏拦截不可用 · 松手回位";
     self.guardStatusLabel.textColor=NSColor.secondaryLabelColor;
     self.statusItem.button.title=self.statusItem.button.image?(self.locked?(!trusted || !connected?@" !":@" 自动"):@""):@"定屏";
@@ -2258,7 +2283,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 - (void)showHelp:(id)sender {
     [self cancelActivation];[self finishPicking];
     NSAlert *alert=[NSAlert new];alert.messageText=@"选择模式，窗口自动归位";
-    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和位置约束，窗口保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用并排列窗口。空分区从目标屏幕已有窗口中补充；不会自动启动已关闭的应用。\n\n拖动换位\n在自动分屏时，拖动普通窗口的标题栏并把鼠标松在目标分区：窗口开始移动后会显示目标分区边框，当前落点高亮，固定分区标为不可替换。空格迁移，有窗口就交换；选择「阻止标题栏拖动」可关闭换位。\n\n固定指定窗口\n在分区一行选好窗口，勾选「固定此窗口」，或从菜单「将当前窗口固定到…」一步完成。固定分区不会被其他新窗口占用；临时关闭仍保留位置。取消勾选后恢复自动分配。\n\n以后激活窗口\n固定窗口始终回自己的分区。更多设置默认开启「新建窗口优先放入当前活动分区」；关闭后新建窗口先填未固定空位。已有窗口优先回原位；固定分区不会被替换。\n\n更多设置\n可调布局比例、间距、目标显示器及新建窗口去向；拖动规则可在主界面选择。自由模式停止位置约束和标题栏拦截。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置，不关闭窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
+    alert.informativeText=[NSString stringWithFormat:@"自由模式\n停止自动归位和位置约束，窗口保留当前位置。⌃⌥⌘0 随时切回。\n\n点击布局图标\n立即启用并排列窗口。空分区从目标屏幕已有窗口中补充；不会自动启动已关闭的应用。\n\n拖动换位\n在自动分屏时，拖动普通窗口的标题栏并把鼠标松在目标分区：窗口开始移动后会显示目标分区边框，当前落点高亮。已分配窗口可主动交换固定窗口，换位同时交换两格的固定目标；空格迁移，有窗口就交换。选择「阻止标题栏拖动」可关闭换位。\n\n固定指定窗口\n在分区一行选好窗口，勾选「固定此窗口」，或从菜单「将当前窗口固定到…」一步完成。固定目标在位时不会被新窗口自动挤占；手动拖动可更新固定位置，临时关闭时保留目标并允许补位。取消勾选后恢复自动分配。\n\n以后激活窗口\n固定窗口始终回自己的分区。更多设置默认开启「新建窗口优先放入当前活动分区」；关闭后新建窗口先填未固定空位。已有窗口优先回原位；固定目标在位时不被自动替换。\n\n更多设置\n可调布局比例、间距、目标显示器及新建窗口去向；拖动规则可在主界面选择。自由模式停止位置约束和标题栏拦截。\n\n恢复分屏前的位置\n进入自由模式并恢复本次启动内记录的位置，不关闭窗口。\n\n只自动接纳目标屏幕、当前桌面的普通可调整窗口；全屏、弹窗、菜单不参与。\n%@",self.hotkeyWarning?:@""];
     [alert addButtonWithTitle:@"知道了"];[alert addButtonWithTitle:@"完整说明"];
     [NSApp activateIgnoringOtherApps:YES];
     if([alert runModal]==NSAlertSecondButtonReturn) {

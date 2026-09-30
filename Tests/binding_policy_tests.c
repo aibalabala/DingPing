@@ -62,8 +62,8 @@ int main(void) {
     };
     slots[0].previous=0;slots[0].borrowed=false;
     assert((FSBindingPlan(slots,3,live,2,result)&1u)!=0 && result[0]==0);
-    /* A manual swap puts Terminal in an absent Code pin's borrowed zone.
-       Re-resolving must keep the dragged window, then restore Code later. */
+    /* An absent Code pin's borrowed zone holds Terminal. Re-resolving must
+       keep this current occupant, then restore Code when it returns. */
     FSBindingSlot dragged[]={
         {.bundle="chrome",.title="browser",.previous=0,.pinned=true},
         {.bundle="code",.title="editor",.previous=2,.pinned=true,.borrowed=true},
@@ -84,6 +84,21 @@ int main(void) {
     };
     assert(FSBindingPlan(dragged,3,codeReturns,4,result)==3u);
     assert(result[0]==0 && result[1]==3 && result[2]==1);
-    puts("PASS: missing pins borrowed, drag swap stable on resolve, returning owners reclaim, title changes and ambiguity.");
+    FSBindingSlot horizontal[]={
+        {.bundle="chrome",.title="Codex",.previous=1},
+        {.bundle="chrome",.title="fixed browser",.previous=0,.pinned=true},
+        {.bundle="finder",.title="files",.previous=2}
+    };
+    FSBindingCandidate exchanged[]={
+        {.bundle="chrome",.title="fixed browser",.restorable=true,.visibleOnTarget=true},
+        {.bundle="chrome",.title="Codex",.restorable=true,.visibleOnTarget=true},
+        {.bundle="finder",.title="files",.restorable=true,.visibleOnTarget=true}
+    };
+    assert(FSBindingPlan(horizontal,3,exchanged,3,result)==2u);
+    assert(result[0]==1 && result[1]==0 && result[2]==2); /* Resolver preserves manual left/right swap. */
+    for(int i=0;i<3;i++){horizontal[i].previous=-1;exchanged[i].used=false;}
+    assert(FSBindingPlan(horizontal,3,exchanged,3,result)==2u);
+    assert(result[0]==1 && result[1]==0 && result[2]==2); /* Restart resolves pin in its new slot. */
+    puts("PASS: missing/returning pins, borrowed stability, same-app manual swap resolves after restart, ambiguity.");
     return 0;
 }

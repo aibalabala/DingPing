@@ -42,3 +42,11 @@ void FSProfileSetOccupant(NSMutableDictionary *profile, NSInteger slot, NSDictio
     if(slot<0 || slot>=4)return;
     ((NSMutableArray *)profile[@"bindings"])[slot]=validDescriptor(descriptor);
 }
+BOOL FSProfileExchangeSlots(NSMutableDictionary *profile, NSInteger first, NSInteger second) {
+    if(first<0 || first>=4 || second<0 || second>=4 || first==second)return NO;
+    NSDictionary *firstPin=FSProfilePin(profile,first),*secondPin=FSProfilePin(profile,second);
+    NSDictionary *firstOccupant=FSProfileOccupant(profile,first),*secondOccupant=FSProfileOccupant(profile,second);
+    FSProfileSetPin(profile,first,secondPin);FSProfileSetPin(profile,second,firstPin);
+    FSProfileSetOccupant(profile,first,secondOccupant);FSProfileSetOccupant(profile,second,firstOccupant);
+    return YES;
+}

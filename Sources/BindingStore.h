@@ -7,3 +7,6 @@ NSDictionary *FSProfilePin(NSDictionary *profile, NSInteger slot);
 NSDictionary *FSProfileOccupant(NSDictionary *profile, NSInteger slot);
 void FSProfileSetPin(NSMutableDictionary *profile, NSInteger slot, NSDictionary *descriptor);
 void FSProfileSetOccupant(NSMutableDictionary *profile, NSInteger slot, NSDictionary *descriptor);
+/* Explicit user rearrangement exchanges both occupants and fixed targets.
+   Automatic placement must continue to call FSProfileSetOccupant only. */
+BOOL FSProfileExchangeSlots(NSMutableDictionary *profile, NSInteger first, NSInteger second);

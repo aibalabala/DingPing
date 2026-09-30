@@ -41,6 +41,8 @@ int FSDropZoneAt(const FSRect zones[4], int count, double x, double y);
    inside the old zone; a drop outside all zones still cancels reassignment. */
 int FSDropDestination(const FSRect zones[4], int count, int source,
                       double mouseX, double mouseY, FSRect droppedWindow);
+/* Managed-zone swaps are deliberate and carry pin assignments with them.
+   Unknown sources cannot displace an active fixed target. */
 FSDropAction FSDropChooseAction(int count, int source, int target,
                                 unsigned pinned, bool targetOccupied);
 #endif
