@@ -1,19 +1,6 @@
 #include "DragPolicy.h"
 #include <math.h>
 
-uint64_t FSPostDragArm(FSPostDragState *state) {
-    if(!state)return 0;
-    state->token++;state->pending=true;return state->token;
-}
-bool FSPostDragTake(FSPostDragState *state,uint64_t token) {
-    if(!state || !state->pending || token!=state->token)return false;
-    state->pending=false;return true;
-}
-void FSPostDragCancel(FSPostDragState *state) {
-    if(!state)return;
-    state->token++;state->pending=false;
-}
-
 bool FSFilterDrag(FSDragState *state, FSDragEvent event, bool enabled, bool confirmedTitle) {
     if(!state)return false;
     switch(event) {
@@ -121,12 +108,3 @@ int FSDropDestination(const FSRect zones[4],int count,int source,
     return center>=0 && center!=source?center:mouse;
 }
 
-FSDropAction FSDropChooseAction(int count,int source,int target,unsigned pinned,bool targetOccupied) {
-    if(count<1 || count>4 || source<-1 || source>=count || target<0 || target>=count || source==target)
-        return FSDropIgnore;
-    /* A deliberate move between managed zones can exchange fixed targets.
-       An unassigned window has nowhere to move a displaced fixed owner. */
-    if(source<0 && (pinned & (1u<<target)))return FSDropBlocked;
-    if(!targetOccupied)return FSDropMove;
-    return source>=0?FSDropSwap:FSDropReplace;
-}

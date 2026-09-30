@@ -5,11 +5,6 @@
 
 typedef enum { FSDragDown, FSDragMotion, FSDragUp, FSDragReset } FSDragEvent;
 typedef struct { bool consuming; } FSDragState;
-typedef struct { uint64_t token; bool pending; } FSPostDragState;
-uint64_t FSPostDragArm(FSPostDragState *state);
-bool FSPostDragTake(FSPostDragState *state, uint64_t token);
-void FSPostDragCancel(FSPostDragState *state);
-
 /* Only a DOWN confirmed to be in a protected title bar starts suppression.
    Content drags remain allowed even when they later cross a title bar. */
 bool FSFilterDrag(FSDragState *state, FSDragEvent event, bool enabled, bool confirmedTitle);
@@ -24,7 +19,6 @@ bool FSVisibleFrameMatch(FSRect axWindow, FSRect visibleWindow);
 double FSDragWindowMatchScore(FSRect axWindow, FSRect visibleWindow, bool directHit);
 bool FSDragUseAXTitleFrame(FSRect axWindow, FSRect visibleWindow, double x, double y);
 
-typedef enum { FSDropIgnore, FSDropBlocked, FSDropMove, FSDropSwap, FSDropReplace } FSDropAction;
 /* A genuine title-bar translation can change assignments; resizing cannot. */
 bool FSWindowWasDragged(FSRect before, FSRect after);
 /* macOS may resize a window while moving it; this remains a drag when the
@@ -41,8 +35,4 @@ int FSDropZoneAt(const FSRect zones[4], int count, double x, double y);
    inside the old zone; a drop outside all zones still cancels reassignment. */
 int FSDropDestination(const FSRect zones[4], int count, int source,
                       double mouseX, double mouseY, FSRect droppedWindow);
-/* Managed-zone swaps are deliberate and carry pin assignments with them.
-   Unknown sources cannot displace an active fixed target. */
-FSDropAction FSDropChooseAction(int count, int source, int target,
-                                unsigned pinned, bool targetOccupied);
 #endif

@@ -25,6 +25,13 @@ static BOOL readAXFrame(AXUIElementRef element, FSRect *frame) {
 @implementation FSWindow
 - (AXUIElementRef)ax { return (__bridge AXUIElementRef)self.element; }
 - (BOOL)readFrame:(FSRect *)frame { return readAXFrame(self.ax,frame); }
+- (BOOL)isAlive {
+    NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:self.pid];
+    return app && !app.terminated && [app.bundleIdentifier isEqual:self.bundleID] &&
+           [readAX(self.ax,kAXRoleAttribute) isEqual:(__bridge NSString *)kAXWindowRole];
+}
+- (BOOL)isMinimized {return [readAX(self.ax,kAXMinimizedAttribute) boolValue];}
+- (BOOL)isHidden {return [NSRunningApplication runningApplicationWithProcessIdentifier:self.pid].hidden;}
 - (BOOL)isRestorable {
     NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:self.pid];
     if (!app || app.terminated || app.activationPolicy!=NSApplicationActivationPolicyRegular ||

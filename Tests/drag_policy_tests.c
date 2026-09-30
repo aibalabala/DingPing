@@ -4,17 +4,6 @@
 #include <stdio.h>
 
 int main(void) {
-    FSPostDragState post={0};
-    uint64_t first=FSPostDragArm(&post);
-    /* Opening a read-only menu or diagnostic does not touch post-release state. */
-    assert(post.pending && FSPostDragTake(&post,first));
-    assert(!FSPostDragTake(&post,first)); /* Delayed callback is idempotent. */
-    first=FSPostDragArm(&post);
-    FSPostDragCancel(&post); /* Space/mode changes invalidate pending release. */
-    assert(!FSPostDragTake(&post,first));
-    first=FSPostDragArm(&post);
-    uint64_t newer=FSPostDragArm(&post);
-    assert(!FSPostDragTake(&post,first) && FSPostDragTake(&post,newer));
     FSDragState s={false};
     /* Content selection must not be interrupted when crossing a title bar. */
     assert(!FSFilterDrag(&s,FSDragDown,true,false));
@@ -85,25 +74,14 @@ int main(void) {
     assert(FSDropDestination(zones,2,0,-900,-700,(FSRect){-825,-1080,600,850})==1);
     assert(FSDropDestination(zones,2,0,-800,-700,w)==1);
     assert(FSDropDestination(zones,2,0,-835,-700,(FSRect){-825,-1080,600,850})==-1);
-    assert(FSDropChooseAction(2,0,1,0,true)==FSDropSwap);
-    assert(FSDropChooseAction(2,0,1,0,false)==FSDropMove);
-    assert(FSDropChooseAction(2,-1,1,0,true)==FSDropReplace);
-    assert(FSDropChooseAction(2,0,1,1u<<0,true)==FSDropSwap);
-    assert(FSDropChooseAction(2,0,1,1u<<1,true)==FSDropSwap);
-    assert(FSDropChooseAction(2,0,1,3u,true)==FSDropSwap);
-    assert(FSDropChooseAction(2,0,1,1u<<0,false)==FSDropMove);
-    assert(FSDropChooseAction(2,-1,1,1u<<1,true)==FSDropBlocked);
-    assert(FSDropChooseAction(2,0,0,0,true)==FSDropIgnore);
-    assert(FSDropChooseAction(2,0,-1,0,false)==FSDropIgnore);
-    /* User's three-zone layout: horizontal swaps involving the fixed left
-       Chrome are as deliberate as the already-working right-side vertical swap. */
+    /* Horizontal and vertical drops use the same geometry rule. */
     FSRect three[4]={{74,38,1235,1394},{1317,38,1235,693},{1317,739,1235,693},{0,0,0,0}};
     int target=FSDropDestination(three,3,1,600,300,(FSRect){300,100,1235,693});
-    assert(target==0 && FSDropChooseAction(3,1,target,1u,true)==FSDropSwap);
+    assert(target==0);
     target=FSDropDestination(three,3,0,1900,300,(FSRect){1400,100,1235,1394});
-    assert(target==1 && FSDropChooseAction(3,0,target,1u,true)==FSDropSwap);
+    assert(target==1);
     target=FSDropDestination(three,3,1,1900,1000,(FSRect){1317,739,1235,693});
-    assert(target==2 && FSDropChooseAction(3,1,target,1u,true)==FSDropSwap);
-    puts("PASS: drag pairing, movement, drop targets, horizontal/vertical manual pin swaps, unknown-source protection.");
+    assert(target==2);
+    puts("PASS: drag pairing, content pass-through, movement, horizontal/vertical drop targets.");
     return 0;
 }

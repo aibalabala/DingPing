@@ -12,6 +12,9 @@
 - (AXUIElementRef)ax;
 - (BOOL)readFrame:(FSRect *)frame;
 - (BOOL)isUsable;
+- (BOOL)isAlive;
+- (BOOL)isMinimized;
+- (BOOL)isHidden;
 - (BOOL)isRestorable;
 - (BOOL)restoreForLayout;
 - (BOOL)raiseWindow;

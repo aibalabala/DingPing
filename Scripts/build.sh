@@ -25,17 +25,19 @@ echo "[1/4] 检查分区、拖动和自动归位规则"
   -o "$build_dir/drag_policy_tests"
 "$build_dir/drag_policy_tests"
 /usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
-  "$project_dir/Sources/PlacementPolicy.c" "$project_dir/Tests/placement_policy_tests.c" \
-  -o "$build_dir/placement_policy_tests"
-"$build_dir/placement_policy_tests"
-/usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
-  "$project_dir/Sources/BindingPolicy.c" "$project_dir/Tests/binding_policy_tests.c" \
-  -o "$build_dir/binding_policy_tests"
-"$build_dir/binding_policy_tests"
-/usr/bin/xcrun clang -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=13.0 \
-  -framework Foundation "$project_dir/Sources/BindingStore.m" "$project_dir/Tests/binding_store_tests.m" \
-  -o "$build_dir/binding_store_tests"
-"$build_dir/binding_store_tests"
+  "$project_dir/Sources/WorkspacePolicy.c" "$project_dir/Tests/workspace_policy_tests.c" \
+  -o "$build_dir/workspace_policy_tests"
+"$build_dir/workspace_policy_tests"
+/usr/bin/xcrun clang -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -mmacosx-version-min=13.0 \
+  -framework Foundation "$project_dir/Sources/WorkspaceStore.m" "$project_dir/Tests/workspace_store_tests.m" \
+  -o "$build_dir/workspace_store_tests"
+"$build_dir/workspace_store_tests"
+/usr/bin/xcrun clang -fobjc-arc -fblocks -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -mmacosx-version-min=13.0 \
+  -framework Cocoa -framework ApplicationServices -framework CoreGraphics \
+  "$project_dir/Sources/Layout.c" "$project_dir/Sources/WorkspacePolicy.c" \
+  "$project_dir/Sources/WorkspaceStore.m" "$project_dir/Sources/WindowAccess.m" "$project_dir/Sources/WindowCoordinator.m" \
+  "$project_dir/Tests/window_coordinator_tests.m" -o "$build_dir/window_coordinator_tests"
+"$build_dir/window_coordinator_tests"
 /bin/bash "$project_dir/Tests/shell_messages_test.sh"
 
 echo "[2/4] 编译当前 Mac 架构的原生程序"
@@ -44,14 +46,12 @@ echo "[2/4] 编译当前 Mac 架构的原生程序"
 /usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -mmacosx-version-min=13.0 \
   -c "$project_dir/Sources/DragPolicy.c" -o "$build_dir/DragPolicy.o"
 /usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -mmacosx-version-min=13.0 \
-  -c "$project_dir/Sources/PlacementPolicy.c" -o "$build_dir/PlacementPolicy.o"
-/usr/bin/xcrun clang -std=c11 -O2 -Wall -Wextra -mmacosx-version-min=13.0 \
-  -c "$project_dir/Sources/BindingPolicy.c" -o "$build_dir/BindingPolicy.o"
+  -c "$project_dir/Sources/WorkspacePolicy.c" -o "$build_dir/WorkspacePolicy.o"
 /usr/bin/xcrun clang -fobjc-arc -fblocks -O2 -Wall -Wextra -Wno-unused-parameter \
   -Wno-deprecated-declarations -mmacosx-version-min=13.0 \
   -framework Cocoa -framework ApplicationServices -framework Carbon -framework CoreGraphics \
-  "$project_dir/Sources/main.m" "$project_dir/Sources/WindowAccess.m" "$project_dir/Sources/DragGuard.m" "$project_dir/Sources/FocusObserver.m" "$project_dir/Sources/BindingStore.m" \
-  "$build_dir/Layout.o" "$build_dir/DragPolicy.o" "$build_dir/PlacementPolicy.o" "$build_dir/BindingPolicy.o" \
+  "$project_dir/Sources/main.m" "$project_dir/Sources/WindowAccess.m" "$project_dir/Sources/DragGuard.m" "$project_dir/Sources/FocusObserver.m" "$project_dir/Sources/WorkspaceStore.m" "$project_dir/Sources/WindowCoordinator.m" \
+  "$build_dir/Layout.o" "$build_dir/DragPolicy.o" "$build_dir/WorkspacePolicy.o" \
   -o "$app_dir/Contents/MacOS/DingPing"
 
 echo "[3/4] 生成应用包"
