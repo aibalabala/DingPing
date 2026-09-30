@@ -34,7 +34,7 @@ echo "[1/4] 检查分区、拖动和自动归位规则"
 "$build_dir/workspace_store_tests"
 /usr/bin/xcrun clang -fobjc-arc -fblocks -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -mmacosx-version-min=13.0 \
   -framework Cocoa -framework ApplicationServices -framework CoreGraphics \
-  "$project_dir/Sources/Layout.c" "$project_dir/Sources/WorkspacePolicy.c" \
+  "$project_dir/Sources/Layout.c" "$project_dir/Sources/DragPolicy.c" "$project_dir/Sources/WorkspacePolicy.c" \
   "$project_dir/Sources/WorkspaceStore.m" "$project_dir/Sources/WindowAccess.m" "$project_dir/Sources/WindowCoordinator.m" \
   "$project_dir/Tests/window_coordinator_tests.m" -o "$build_dir/window_coordinator_tests"
 "$build_dir/window_coordinator_tests"
