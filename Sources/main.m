@@ -792,7 +792,6 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     /* A global event monitor runs asynchronously. Let the target app complete
        the move before reading its accessibility frame and reassigning zones. */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.12*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        FSApp *app=weakSelf;
         [weakSelf completePendingDrop:token];
     });
 }

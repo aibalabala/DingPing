@@ -12,7 +12,7 @@ fi
 
 bundle_id=local.dingping.fixedsplit
 expected_version=0.7.0
-expected_build=17
+expected_build=18
 target_app="$HOME/Applications/定屏.app"
 system_app=/Applications/定屏.app
 if [[ -d "$system_app" && ! -L "$system_app" &&
