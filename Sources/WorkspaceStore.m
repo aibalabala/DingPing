@@ -53,6 +53,8 @@ static NSMutableDictionary *baseProfile(NSString *name,NSString *display) {
            !isfinite([old[@"gap"] doubleValue])) {valid=NO;break;}
         for(NSString *key in @[@"preventDrag",@"newWindowInActiveSlot",@"restoreMinimized",@"favorite"])
             if(old[key] && ![old[key] isKindOfClass:NSNumber.class])valid=NO;
+        if(version<4)for(NSString *key in @[@"bindings",@"pins"])
+            if(old[key] && ![old[key] isKindOfClass:NSArray.class])valid=NO;
         if(!valid)break;
         NSMutableDictionary *p=baseProfile(old[@"name"],stringValue(old[@"display"]));
         p[@"id"]=old[@"id"];p[@"layout"]=old[@"layout"];
@@ -83,7 +85,7 @@ static NSMutableDictionary *baseProfile(NSString *name,NSString *display) {
             for(NSInteger slot=0;slot<4;slot++) {
                 id binding=(NSUInteger)slot<bindings.count?bindings[slot]:@{};
                 id pin=(NSUInteger)slot<pins.count?pins[slot]:@{};
-                if(version<3 && [binding isKindOfClass:NSDictionary.class] && [binding[@"pinned"] boolValue])pin=binding;
+                if(version<3 && [binding isKindOfClass:NSDictionary.class] && [binding[@"pinned"] isKindOfClass:NSNumber.class] && [binding[@"pinned"] boolValue])pin=binding;
                 NSMutableDictionary *fixed=descriptor(pin),*occupant=descriptor(binding);
                 if(fixed) {NSMutableDictionary *r=[self addWindow:fixed slot:slot profile:p];r[@"pinned"]=@YES;}
                 if(occupant && ![occupant isEqual:fixed])[self addWindow:occupant slot:slot profile:p];
@@ -96,8 +98,8 @@ static NSMutableDictionary *baseProfile(NSString *name,NSString *display) {
         [profiles addObject:p];self.saveBlocked=hasData;
     }
     NSString *active=valid && [profileIDs containsObject:stringValue(loaded[@"active"])]?loaded[@"active"]:profiles.firstObject[@"id"];
-    self.config=[@{@"version":@4,@"profiles":profiles,@"active":active,
-                  @"mode":valid && [loaded[@"mode"] isEqual:@"auto"]?@"auto":@"free"} mutableCopy];
+    BOOL automatic=valid && (version==1?[loaded[@"locked"] isEqual:@YES]:[loaded[@"mode"] isEqual:@"auto"]);
+    self.config=[@{@"version":@4,@"profiles":profiles,@"active":active,@"mode":automatic?@"auto":@"free"} mutableCopy];
     return self;
 }
 - (NSMutableDictionary *)profileWithID:(NSString *)identifier {

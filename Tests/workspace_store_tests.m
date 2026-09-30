@@ -9,12 +9,21 @@ int main(void) {@autoreleasepool {
     NSDictionary *legacy=@{@"version":@3,@"active":@"old",@"mode":@"auto",@"profiles":@[
         @{@"id":@"old",@"name":@"工作",@"display":@"monitor",@"layout":@2,@"ratio":@.5,@"gap":@8,
           @"pins":@[chrome,code,@{},@{}],@"bindings":@[chrome,terminal,terminal,@{}]}]};
+    NSDictionary *beforeLegacy=deep(legacy);
     FSWorkspaceStore *store=[[FSWorkspaceStore alloc] initWithConfig:legacy defaultDisplay:@"monitor"];
     check(!store.saveBlocked && [store.config[@"version"] isEqual:@4],@"schema 3 migrates");
     NSMutableDictionary *p=store.activeProfile;
     check([p[@"windows"] count]==4 && [p[@"favorite"] boolValue],@"both absent fixed owner and borrowed occupant survive");
     check([p[@"windows"][1][@"bundle"] isEqual:@"code"] && [p[@"windows"][1][@"pinned"] boolValue],@"Code's fixed record survives");
-    check([legacy isEqual:deep(legacy)],@"migration does not mutate source");
+    check([legacy isEqual:beforeLegacy],@"migration does not mutate source");
+    for(NSNumber *version in @[@1,@2]) {
+        NSDictionary *old=@{@"version":version,@"active":@"v1",@"locked":@YES,@"mode":@"auto",@"profiles":@[
+            @{@"id":@"v1",@"name":@"旧版",@"display":@"monitor",@"layout":@0,@"ratio":@.5,@"gap":@8,
+              @"bindings":@[@{@"bundle":@"chrome",@"app":@"Chrome",@"title":@"old",@"pinned":@YES},@{},@{},@{}]}]};
+        FSWorkspaceStore *migrated=[[FSWorkspaceStore alloc] initWithConfig:old defaultDisplay:@"monitor"];
+        check(!migrated.saveBlocked && [migrated.config[@"mode"] isEqual:@"auto"] &&
+            [migrated.activeProfile[@"windows"][0][@"pinned"] boolValue],@"v1/v2 mode and embedded pin migrate");
+    }
     NSMutableDictionary *builtin=[store builtin:0 name:@"左右平分" display:@"monitor" layout:0 ratio:.5];
     check(builtin!=p && [builtin[@"windows"] count]==0,@"builtin has separate memory");
     check([store builtin:0 name:@"左右平分" display:@"monitor" layout:0 ratio:.5]==builtin,@"same builtin is reused");
@@ -47,6 +56,8 @@ int main(void) {@autoreleasepool {
     check([store profileWithID:builtin[@"id"]]!=nil,@"builtin remains");
     FSWorkspaceStore *bad=[[FSWorkspaceStore alloc] initWithConfig:@{@"version":@99,@"profiles":@[]} defaultDisplay:@"monitor"];
     check(bad.saveBlocked,@"unknown schema is preserved");
+    FSWorkspaceStore *nullVersion=[[FSWorkspaceStore alloc] initWithConfig:@{@"version":NSNull.null,@"profiles":@[]} defaultDisplay:@"monitor"];
+    check(nullVersion.saveBlocked,@"malformed version cannot crash or overwrite");
     NSURL *dir=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
     [NSFileManager.defaultManager createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:NULL];NSURL *url=[dir URLByAppendingPathComponent:@"layouts.json"];
     NSData *original=[NSJSONSerialization dataWithJSONObject:legacy options:0 error:NULL];[original writeToURL:url atomically:YES];

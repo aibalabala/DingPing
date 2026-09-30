@@ -678,6 +678,9 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next,EventRef event,void *con
     self.statusLabel.stringValue=self.statusText?:@"";self.statusItem.button.toolTip=[NSString stringWithFormat:@"定屏 · %@",p[@"name"]];self.refreshing=NO;
 }
 - (void)showSettings:(id)sender {
+    if(self.coordinator.busy || self.dragToken) {
+        __weak FSApp *weakSelf=self;[self performWhenIdle:^{[weakSelf showSettings:nil];}];return;
+    }
     if(!self.settingsWindow)[self buildUI];[self refreshControls];[NSApp activateIgnoringOtherApps:YES];[self.settingsWindow makeKeyAndOrderFront:nil];
     [NSUserDefaults.standardUserDefaults setObject:FSVersion forKey:@"lastShownVersion"];
 }

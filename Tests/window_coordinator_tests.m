@@ -8,6 +8,7 @@ static void pump(double seconds) {[NSRunLoop.currentRunLoop runUntilDate:[NSDate
 @property(nonatomic) FSRect frame;
 @property(nonatomic) BOOL alive;
 @property(nonatomic) BOOL minimized;
+@property(nonatomic) BOOL offTarget;
 @property(nonatomic) NSUInteger moveCount;
 @property(nonatomic) NSUInteger raiseCount;
 @end
@@ -20,7 +21,7 @@ static void pump(double seconds) {[NSRunLoop.currentRunLoop runUntilDate:[NSDate
 - (BOOL)isMinimized {return self.minimized;}
 - (BOOL)isHidden {return NO;}
 - (BOOL)readFrame:(FSRect *)frame {if(!self.alive)return NO;*frame=self.frame;return YES;}
-- (BOOL)moveTo:(FSRect)frame error:(NSString **)error {self.frame=frame;self.moveCount++;return self.alive;}
+- (BOOL)moveTo:(FSRect)frame error:(NSString **)error {self.frame=frame;self.offTarget=NO;self.moveCount++;return self.alive;}
 - (BOOL)restoreForLayout {self.minimized=NO;return self.alive;}
 - (BOOL)raiseWindow {self.raiseCount++;return self.isUsable;}
 - (BOOL)focusWindow {return [self raiseWindow];}
@@ -36,7 +37,7 @@ static void pump(double seconds) {[NSRunLoop.currentRunLoop runUntilDate:[NSDate
 - (int)zonesForProfile:(NSDictionary *)profile into:(FSRect *)zones {
     return FSBuildZones([profile[@"layout"] intValue],(FSRect){74,38,2486,1394},[profile[@"ratio"] doubleValue],8,zones);
 }
-- (BOOL)window:(FSWindow *)window onTargetOfProfile:(NSDictionary *)profile rows:(NSArray *)rows {return [window isUsable];}
+- (BOOL)window:(FSWindow *)window onTargetOfProfile:(NSDictionary *)profile rows:(NSArray *)rows {return [window isUsable] && !((FakeWindow *)window).offTarget;}
 @end
 static FakeWindow *window(NSString *identity,NSString *bundle) {
     FakeWindow *w=[FakeWindow new];w.identity=identity;w.bundleID=bundle;w.appName=bundle;w.title=identity;w.alive=YES;
@@ -85,6 +86,9 @@ int main(void) {@autoreleasepool {
     FakeWindow *reopened=window(@"new Chrome identity",@"chrome");reopened.title=@"Changed tab";
     env.windows=@[a,reopened,c,d,e];pump(.8);[engine tick];
     check([engine slotForWindow:reopened]==1 && [p[@"windows"] count]==5,@"reopened unique window reuses memory without replacing other windows");
+    c.offTarget=YES;c.frame=(FSRect){3000,200,900,600};NSUInteger cMoves=c.moveCount;
+    [engine assignWindow:c toSlot:2];check(!c.offTarget && c.moveCount>cMoves && [engine slotForWindow:c]==2,
+        @"explicit user assignment moves off-target window while background maintenance stays scoped");
     NSUInteger moves=b.moveCount;[engine setFreeMode];pump(.8);[engine tick];check(b.moveCount==moves,@"free mode stops movement");
     NSData *data=[NSJSONSerialization dataWithJSONObject:store.config options:0 error:NULL];
     FSWorkspaceStore *reload=[[FSWorkspaceStore alloc] initWithConfig:[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] defaultDisplay:@"test"];

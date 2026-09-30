@@ -160,10 +160,11 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
 - (NSInteger)slotForWindow:(FSWindow *)window {
     NSDictionary *r=[self recordForKey:[self keyForWindow:window register:NO]];return r?[r[@"slot"] integerValue]:-1;
 }
-- (void)moveKey:(NSString *)key target:(FSRect)target token:(uint64_t)token {
+- (void)moveKey:(NSString *)key target:(FSRect)target token:(uint64_t)token explicit:(BOOL)explicit {
     FSWindow *w=self.live[key];FSRect current;
     if(!FSWorkspaceCommandCurrent(&_gate,token) || [self.pendingMoves containsObject:key] ||
-       [self.failures[key] integerValue]>=2 || ![self eligible:w] || ![w readFrame:&current] || FSRectNear(current,target,4))return;
+       [self.failures[key] integerValue]>=2 || ![w isUsable] || (!explicit && ![self eligible:w]) ||
+       ![w readFrame:&current] || FSRectNear(current,target,4))return;
     if(!self.originals[key])self.originals[key]=[NSValue valueWithRect:NSMakeRect(current.x,current.y,current.width,current.height)];
     NSString *error=nil;
     if(![w moveTo:target error:&error]) {self.failures[key]=@2;[self note:[NSString stringWithFormat:@"%@ 调整暂停：%@",w.appName,error]];return;}
@@ -185,7 +186,7 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
     FSRect zones[4];int count=[self zones:zones];
     for(NSString *key in self.map) {
         NSDictionary *r=[self recordForKey:key];NSInteger slot=[r[@"slot"] integerValue];
-        if(r && slot>=0 && slot<count)[self moveKey:key target:zones[slot] token:token];
+        if(r && slot>=0 && slot<count)[self moveKey:key target:zones[slot] token:token explicit:NO];
     }
 }
 - (void)updateTopsReveal:(BOOL)reveal {
@@ -266,7 +267,7 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
        and queued switches therefore observe the user's final assignment. */
     if(_gate.generation!=token || (!_gate.dragging && !_gate.dropPending))return;
     FSRect zones[4];int count=[self zones:zones];
-    if(window && destination>=0 && destination<count) {
+    if(window && [window isUsable] && destination>=0 && destination<count) {
         NSString *key=[self keyForWindow:window register:YES];NSMutableDictionary *r=[self recordForKey:key];
         if(!r){r=[self.store addWindow:windowDescriptor(window) slot:destination profile:self.profile];self.map[key]=r[@"id"];}
         NSInteger source=[r[@"slot"] integerValue];
@@ -276,7 +277,12 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
                                 window.appName,(long)source+1,(long)destination+1,saved?@"已保存":@"本次记住，写入失败"]];
     }
     if(!FSWorkspaceFinishDrag(&_gate,token))return;
-    self.rows=[self.environment visibleRows];[self arrange:token];[self updateTopsReveal:YES];
+    self.rows=[self.environment visibleRows];
+    if(window && destination>=0 && destination<count) {
+        NSString *key=[self keyForWindow:window register:NO];
+        if(key)[self moveKey:key target:zones[destination] token:token explicit:YES];
+    }
+    [self arrange:token];[self updateTopsReveal:YES];
     if(window && destination>=0 && destination<count)[window raiseWindow];
     self.nextMaintenance=NSDate.timeIntervalSinceReferenceDate+.35;
     if(self.onIdle)self.onIdle();
