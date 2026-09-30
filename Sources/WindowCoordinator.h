@@ -42,7 +42,7 @@
 - (void)togglePinInSlot:(NSInteger)slot;
 - (BOOL)topWindowPinned:(NSInteger)slot;
 - (NSMutableDictionary *)saveFavorite:(NSString *)name;
-- (void)save;
+- (BOOL)save;
 - (NSString *)diagnostic;
 - (void)restoreOriginalPositions;
 @end

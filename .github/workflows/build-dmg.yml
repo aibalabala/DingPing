@@ -42,6 +42,20 @@ jobs:
           bash Tests/installer_policy_tests.sh
           file "$app/Contents/MacOS/DingPing"
 
+      - name: Render fixed-size interface for review
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/DingPing-ui"
+          "$RUNNER_TEMP/DingPing-build/定屏.app/Contents/MacOS/DingPing" --render-ui "$RUNNER_TEMP/DingPing-ui"
+          test -s "$RUNNER_TEMP/DingPing-ui/DingPing-layouts.png"
+          test -s "$RUNNER_TEMP/DingPing-ui/DingPing-settings.png"
+
+      - name: Upload interface previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: DingPing-v0.8.0-interface
+          path: ${{ runner.temp }}/DingPing-ui/*.png
+
       - name: Check repair tool cannot reset in noninteractive CI
         shell: bash
         run: |

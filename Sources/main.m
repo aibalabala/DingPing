@@ -30,7 +30,6 @@ static NSArray<NSDictionary *> *quickPresets(void) {
                @"detail":@"左右各占半屏，左侧再分为上下两格"}];
 }
 static NSRect nsrect(FSRect r) { return NSMakeRect(r.x,r.y,r.width,r.height); }
-static FSRect fsrect(NSRect r) { return (FSRect){r.origin.x,r.origin.y,r.size.width,r.size.height}; }
 static CGPoint mouseAXPoint(NSEvent *event) {
     if(event.CGEvent)return CGEventGetLocation(event.CGEvent);
     NSPoint point=event.locationInWindow; /* Global mouse events use screen coordinates. */
@@ -194,7 +193,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) NSPopUpButton *layoutPopup;
 @property(nonatomic,strong) NSSlider *ratioSlider;
 @property(nonatomic,strong) NSSlider *gapSlider;
-@property(nonatomic,strong) NSButton *newWindowCheckbox;
+@property(nonatomic,strong) NSButton *createdWindowCheckbox;
 @property(nonatomic,strong) NSButton *restoreMinCheckbox;
 @property(nonatomic,strong) NSButton *preventDragCheckbox;
 @property(nonatomic,strong) NSMutableArray<NSPopUpButton *> *stackPopups;
@@ -230,6 +229,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)refreshControls;
 - (void)runDeferredCommand;
 - (void)completeDrop;
+- (BOOL)renderPreviewToDirectory:(NSString *)directory;
 @end
 static OSStatus hotKeyCallback(EventHandlerCallRef next,EventRef event,void *context) {
     EventHotKeyID identifier;OSStatus result=GetEventParameter(event,kEventParamDirectObject,typeEventHotKeyID,NULL,sizeof(identifier),NULL,&identifier);
@@ -423,12 +423,17 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next,EventRef event,void *con
 - (void)geometryChanged {
     [self.coordinator save];if(self.coordinator.enabled)[self activateProfileID:self.profile[@"id"]];else [self refreshControls];
 }
-- (void)screenChanged:(NSPopUpButton *)sender {if(self.refreshing)return;self.profile[@"display"]=sender.selectedItem.representedObject;[self geometryChanged];}
-- (void)layoutChanged:(NSPopUpButton *)sender {if(self.refreshing)return;self.profile[@"layout"]=@(sender.indexOfSelectedItem);[self geometryChanged];}
-- (void)ratioChanged:(NSSlider *)sender {if(self.refreshing)return;self.profile[@"ratio"]=@(round(sender.doubleValue)/100.0);[self geometryChanged];}
-- (void)gapChanged:(NSSlider *)sender {if(self.refreshing)return;self.profile[@"gap"]=@(round(sender.doubleValue));[self geometryChanged];}
+- (void)updateGeometry:(NSString *)key value:(id)value {
+    NSString *identifier=self.profile[@"id"];__weak FSApp *weakSelf=self;
+    [self performWhenIdle:^{FSApp *app=weakSelf;if(!app || ![app.profile[@"id"] isEqual:identifier])return;
+        app.profile[key]=value;[app geometryChanged];}];
+}
+- (void)screenChanged:(NSPopUpButton *)sender {if(!self.refreshing)[self updateGeometry:@"display" value:sender.selectedItem.representedObject];}
+- (void)layoutChanged:(NSPopUpButton *)sender {if(!self.refreshing)[self updateGeometry:@"layout" value:@(sender.indexOfSelectedItem)];}
+- (void)ratioChanged:(NSSlider *)sender {if(!self.refreshing)[self updateGeometry:@"ratio" value:@(round(sender.doubleValue)/100.0)];}
+- (void)gapChanged:(NSSlider *)sender {if(!self.refreshing)[self updateGeometry:@"gap" value:@(round(sender.doubleValue))];}
 - (void)optionChanged:(NSButton *)sender {
-    if(self.refreshing)return;NSString *key=sender==self.newWindowCheckbox?@"newWindowInActiveSlot":sender==self.restoreMinCheckbox?@"restoreMinimized":@"preventDrag";
+    if(self.refreshing)return;NSString *key=sender==self.createdWindowCheckbox?@"newWindowInActiveSlot":sender==self.restoreMinCheckbox?@"restoreMinimized":@"preventDrag";
     self.profile[key]=@(sender.state==NSControlStateValueOn);[self.coordinator save];[self syncGuard];
 }
 - (void)syncGuard {
@@ -609,8 +614,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next,EventRef event,void *con
     self.ratioSlider=[NSSlider sliderWithValue:50 minValue:20 maxValue:80 target:self action:@selector(ratioChanged:)];self.ratioSlider.frame=NSMakeRect(25,244,438,26);self.ratioSlider.continuous=NO;[a addSubview:self.ratioSlider];
     self.gapLabel=label(@"",NSMakeRect(515,214,438,23),12,YES);[a addSubview:self.gapLabel];
     self.gapSlider=[NSSlider sliderWithValue:8 minValue:0 maxValue:40 target:self action:@selector(gapChanged:)];self.gapSlider.frame=NSMakeRect(515,244,438,26);self.gapSlider.continuous=NO;[a addSubview:self.gapSlider];
-    self.newWindowCheckbox=[NSButton checkboxWithTitle:@"新窗口叠放在当前操作的分区（关闭后：空格优先，再选窗口最少的分区）" target:self action:@selector(optionChanged:)];
-    self.newWindowCheckbox.frame=NSMakeRect(25,301,929,26);[a addSubview:self.newWindowCheckbox];
+    self.createdWindowCheckbox=[NSButton checkboxWithTitle:@"新窗口叠放在当前操作的分区（关闭后：空格优先，再选窗口最少的分区）" target:self action:@selector(optionChanged:)];
+    self.createdWindowCheckbox.frame=NSMakeRect(25,301,929,26);[a addSubview:self.createdWindowCheckbox];
     self.restoreMinCheckbox=[NSButton checkboxWithTitle:@"切换方案时恢复最小化窗口（默认关闭，最小化状态会保留）" target:self action:@selector(optionChanged:)];
     self.restoreMinCheckbox.frame=NSMakeRect(25,340,929,26);[a addSubview:self.restoreMinCheckbox];
     self.preventDragCheckbox=[NSButton checkboxWithTitle:@"禁止标题栏拖动（开启后关闭拖动分配，内容拖拽仍可用）" target:self action:@selector(optionChanged:)];
@@ -665,7 +670,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next,EventRef event,void *con
     [self.layoutPopup selectItemAtIndex:[p[@"layout"] integerValue]];self.ratioSlider.doubleValue=[p[@"ratio"] doubleValue]*100;
     self.gapSlider.doubleValue=[p[@"gap"] doubleValue];self.ratioLabel.stringValue=[NSString stringWithFormat:@"主分区比例：%.0f%%",self.ratioSlider.doubleValue];
     self.gapLabel.stringValue=[NSString stringWithFormat:@"分区间距：%.0f",self.gapSlider.doubleValue];
-    self.newWindowCheckbox.state=[p[@"newWindowInActiveSlot"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
+    self.createdWindowCheckbox.state=[p[@"newWindowInActiveSlot"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
     self.restoreMinCheckbox.state=[p[@"restoreMinimized"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
     self.preventDragCheckbox.state=[p[@"preventDrag"] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
     self.permissionLabel.stringValue=[NSString stringWithFormat:@"辅助功能：%@；当前程序：%@",AXIsProcessTrusted()?@"已授权":@"未授权",NSBundle.mainBundle.bundlePath];
@@ -727,8 +732,30 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next,EventRef event,void *con
     else if(identifier==8)[self applyCurrent:nil];else if(identifier==9)[self nextFavorite:nil];else if(identifier==10)[self showSettings:nil];
 }
 - (void)quit:(id)sender {[NSApp terminate:nil];}
+- (BOOL)renderPreviewToDirectory:(NSString *)directory {
+    /* Offscreen UI verification only. No installation, permission prompt,
+       observers, timers, input monitors or window movement are started. */
+    self.store=[[FSWorkspaceStore alloc] initWithConfig:nil defaultDisplay:@"preview"];
+    self.store.activeProfile[@"layout"]=@2;self.store.activeProfile[@"ratio"]=@.5;self.store.config[@"mode"]=@"auto";
+    [self.store saveFavorite:@"编程开发"];[self.store saveFavorite:@"写作工作台"];[self.store saveFavorite:@"剪辑"];
+    self.coordinator=[[FSWindowCoordinator alloc] initWithStore:self.store];
+    self.statusText=@"拖动后自动保存当前方案的位置。点常用方案名称即可恢复；关闭或最小化后显示下层窗口。";
+    [self buildUI];[self refreshControls];
+    [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL];
+    for(int page=0;page<2;page++) {
+        self.mainView.hidden=page!=0;self.advancedView.hidden=page==0;
+        NSView *view=self.settingsWindow.contentView;[view layoutSubtreeIfNeeded];
+        NSBitmapImageRep *bitmap=[view bitmapImageRepForCachingDisplayInRect:view.bounds];
+        [view cacheDisplayInRect:view.bounds toBitmapImageRep:bitmap];
+        NSData *png=[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        if(!png || ![png writeToFile:[directory stringByAppendingPathComponent:page?@"DingPing-settings.png":@"DingPing-layouts.png"] atomically:YES])return NO;
+    }
+    return YES;
+}
 @end
 int main(int argc,const char *argv[]) {
     @autoreleasepool {NSApplication *app=NSApplication.sharedApplication;[app setActivationPolicy:NSApplicationActivationPolicyAccessory];
-        static FSApp *delegate;delegate=[FSApp new];app.delegate=delegate;[app run];}return 0;
+        static FSApp *delegate;delegate=[FSApp new];
+        if(argc==3 && strcmp(argv[1],"--render-ui")==0)return [delegate renderPreviewToDirectory:[NSString stringWithUTF8String:argv[2]]]?0:1;
+        app.delegate=delegate;[app run];}return 0;
 }

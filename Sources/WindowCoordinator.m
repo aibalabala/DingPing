@@ -61,10 +61,12 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
     [self.trace addObject:message];if(self.trace.count>24)[self.trace removeObjectAtIndex:0];
     if(self.onMessage)self.onMessage(message);
 }
-- (void)save {
+- (BOOL)save {
     NSError *error=nil;
-    if(![self.store save:&error] && error)[self note:[@"保存方案失败：" stringByAppendingString:error.localizedDescription]];
+    BOOL saved=[self.store save:&error];
+    if(!saved)[self note:self.store.loadNote?:[NSString stringWithFormat:@"保存方案失败：%@",error.localizedDescription?:@"原配置已保留，请在方案文件夹检查 layouts.json。"]];
     if(self.onChange)self.onChange();
+    return saved;
 }
 - (NSString *)keyForWindow:(FSWindow *)window register:(BOOL)create {
     if(!window)return nil;
@@ -273,8 +275,8 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
         NSInteger source=[r[@"slot"] integerValue];
         [self.store updateRecord:r descriptor:windowDescriptor(window)];
         [self.store moveRecord:r[@"id"] toSlot:destination profile:self.profile];self.activeSlot=destination;
-        [self save];[self note:[NSString stringWithFormat:@"%@：分区 %ld → %ld · 已保存，目标分区原窗口保留在下层。",
-                                window.appName,(long)source+1,(long)destination+1]];
+        BOOL saved=[self save];[self note:[NSString stringWithFormat:@"%@：分区 %ld → %ld · %@，目标分区原窗口保留在下层。",
+                                window.appName,(long)source+1,(long)destination+1,saved?@"已保存":@"本次记住，写入失败"]];
     }
     if(!FSWorkspaceFinishDrag(&_gate,token))return;
     self.rows=[self.environment visibleRows];[self arrange:token];[self updateTopsReveal:YES];
@@ -300,8 +302,9 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
 }
 - (NSMutableDictionary *)saveFavorite:(NSString *)name {
     if(self.busy)return nil;NSString *old=self.profile[@"id"];NSDictionary *map=[self.map copy];
+    if(self.store.saveBlocked){[self note:self.store.loadNote?:@"配置格式异常，请打开方案文件夹检查；本次不覆盖原文件。"];return nil;}
     NSMutableDictionary *p=[self.store saveFavorite:name];self.memberships[p[@"id"]]=[map mutableCopy];
-    FSWorkspaceEnable(&_gate,self.enabled);[self.pendingMoves removeAllObjects];[self save];
+    FSWorkspaceEnable(&_gate,self.enabled);[self.pendingMoves removeAllObjects];if(![self save])return nil;
     [self note:[NSString stringWithFormat:@"已保存常用方案「%@」；后续拖动自动更新这份方案，原布局「%@」独立保留。",name,[self.store profileWithID:old][@"name"]]];return p;
 }
 - (void)restoreOriginalPositions {
@@ -330,6 +333,10 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
         }
         if(!stack.count)[lines addObject:[NSString stringWithFormat:@"%d 空分区",slot+1]];
     }
+    NSSet *matched=[NSSet setWithArray:self.map.allValues];
+    for(NSDictionary *r in self.profile[@"windows"])if(![matched containsObject:r[@"id"]])
+        [lines addObject:[NSString stringWithFormat:@"记忆待恢复：%@ — %@ → 分区 %ld%@",r[@"app"],r[@"title"],
+                          (long)[r[@"slot"] integerValue]+1,[r[@"pinned"] boolValue]?@"（固定标记保留）":@""]];
     [lines addObject:@"最近事件（点击不会修改分区）："];[lines addObjectsFromArray:self.trace];return [lines componentsJoinedByString:@"\n"];
 }
 @end
