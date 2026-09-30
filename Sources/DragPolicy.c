@@ -107,4 +107,3 @@ int FSDropDestination(const FSRect zones[4],int count,int source,
                                           droppedWindow.y+droppedWindow.height/2);
     return center>=0 && center!=source?center:mouse;
 }
-

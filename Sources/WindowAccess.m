@@ -30,6 +30,14 @@ static BOOL readAXFrame(AXUIElementRef element, FSRect *frame) {
     return app && !app.terminated && [app.bundleIdentifier isEqual:self.bundleID] &&
            [readAX(self.ax,kAXRoleAttribute) isEqual:(__bridge NSString *)kAXWindowRole];
 }
+- (BOOL)isDefinitelyClosed {
+    NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:self.pid];
+    if(!app || app.terminated || ![app.bundleIdentifier isEqual:self.bundleID])return YES;
+    CFTypeRef role=NULL;AXError error=AXUIElementCopyAttributeValue(self.ax,kAXRoleAttribute,&role);
+    if(role)CFRelease(role);
+    /* A messaging timeout is not proof of closure and must not erase identity. */
+    return error==kAXErrorInvalidUIElement;
+}
 - (BOOL)isMinimized {return [readAX(self.ax,kAXMinimizedAttribute) boolValue];}
 - (BOOL)isHidden {return [NSRunningApplication runningApplicationWithProcessIdentifier:self.pid].hidden;}
 - (BOOL)isRestorable {

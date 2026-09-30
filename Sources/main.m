@@ -75,6 +75,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @interface FSFlippedView : NSView @end
 @implementation FSFlippedView
 - (BOOL)isFlipped {return YES;}
+- (void)drawRect:(NSRect)dirtyRect {[NSColor.windowBackgroundColor setFill];NSRectFill(self.bounds);}
 @end
 @interface FSCard : FSFlippedView @end
 @implementation FSCard

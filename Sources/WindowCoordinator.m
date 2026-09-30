@@ -98,13 +98,10 @@ static NSDictionary *windowDescriptor(FSWindow *w) {
     }
     for(NSString *key in [self.live.allKeys copy]) {
         FSWindow *w=self.live[key];
-        if(![w isAlive]) {
-            NSUInteger attempts=[self.missing[key] unsignedIntegerValue]+1;self.missing[key]=@(attempts);
-            if(attempts>=3) {
+        if([w isDefinitelyClosed]) {
                 [self.live removeObjectForKey:key];[self.missing removeObjectForKey:key];
                 for(NSMutableDictionary *map in self.memberships.allValues)[map removeObjectForKey:key];
                 [self.pendingMoves removeObject:key];[self.failures removeObjectForKey:key];
-            }
         } else if([self eligible:w] && ![keys containsObject:key])[keys addObject:key];
     }
     NSMutableArray *candidates=[NSMutableArray new];

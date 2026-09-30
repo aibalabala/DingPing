@@ -13,6 +13,7 @@
 - (BOOL)readFrame:(FSRect *)frame;
 - (BOOL)isUsable;
 - (BOOL)isAlive;
+- (BOOL)isDefinitelyClosed;
 - (BOOL)isMinimized;
 - (BOOL)isHidden;
 - (BOOL)isRestorable;

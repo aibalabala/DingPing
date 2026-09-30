@@ -14,6 +14,7 @@ static void pump(double seconds) {[NSRunLoop.currentRunLoop runUntilDate:[NSDate
 @implementation FakeWindow
 - (BOOL)sameWindow:(FSWindow *)w {return [w isKindOfClass:FakeWindow.class] && [self.identity isEqual:((FakeWindow *)w).identity];}
 - (BOOL)isAlive {return self.alive;}
+- (BOOL)isDefinitelyClosed {return !self.alive;}
 - (BOOL)isRestorable {return self.alive;}
 - (BOOL)isUsable {return self.alive && !self.minimized;}
 - (BOOL)isMinimized {return self.minimized;}
@@ -78,6 +79,12 @@ int main(void) {@autoreleasepool {
     drag=[engine beginDrag];check(drag!=0,@"user drag preempts in-progress layout effects");
     [engine releaseDrag:drag];[engine finishDrag:drag window:b destination:1];pump(.55);
     check([engine slotForWindow:b]==1 && !engine.busy,@"stale layout completion cannot overwrite later drag");
+    NSUInteger exposed=e.raiseCount;b.alive=NO;pump(.8);[engine tick];
+    check([engine topWindowInSlot:1]==e && e.raiseCount>exposed && [p[@"windows"] count]==5,
+          @"closing top reveals lower window and keeps its saved record");
+    FakeWindow *reopened=window(@"new Chrome identity",@"chrome");reopened.title=@"Changed tab";
+    env.windows=@[a,reopened,c,d,e];pump(.8);[engine tick];
+    check([engine slotForWindow:reopened]==1 && [p[@"windows"] count]==5,@"reopened unique window reuses memory without replacing other windows");
     NSUInteger moves=b.moveCount;[engine setFreeMode];pump(.8);[engine tick];check(b.moveCount==moves,@"free mode stops movement");
     NSData *data=[NSJSONSerialization dataWithJSONObject:store.config options:0 error:NULL];
     FSWorkspaceStore *reload=[[FSWorkspaceStore alloc] initWithConfig:[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] defaultDisplay:@"test"];
