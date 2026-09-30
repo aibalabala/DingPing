@@ -4,6 +4,17 @@
 #include <stdio.h>
 
 int main(void) {
+    FSPostDragState post={0};
+    uint64_t first=FSPostDragArm(&post);
+    /* Opening a read-only menu or diagnostic does not touch post-release state. */
+    assert(post.pending && FSPostDragTake(&post,first));
+    assert(!FSPostDragTake(&post,first)); /* Delayed callback is idempotent. */
+    first=FSPostDragArm(&post);
+    FSPostDragCancel(&post); /* Space/mode changes invalidate pending release. */
+    assert(!FSPostDragTake(&post,first));
+    first=FSPostDragArm(&post);
+    uint64_t newer=FSPostDragArm(&post);
+    assert(!FSPostDragTake(&post,first) && FSPostDragTake(&post,newer));
     FSDragState s={false};
     /* Content selection must not be interrupted when crossing a title bar. */
     assert(!FSFilterDrag(&s,FSDragDown,true,false));

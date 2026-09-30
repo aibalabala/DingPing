@@ -1,9 +1,14 @@
 #ifndef FIXED_SPLIT_DRAG_POLICY_H
 #define FIXED_SPLIT_DRAG_POLICY_H
 #include "Layout.h"
+#include <stdint.h>
 
 typedef enum { FSDragDown, FSDragMotion, FSDragUp, FSDragReset } FSDragEvent;
 typedef struct { bool consuming; } FSDragState;
+typedef struct { uint64_t token; bool pending; } FSPostDragState;
+uint64_t FSPostDragArm(FSPostDragState *state);
+bool FSPostDragTake(FSPostDragState *state, uint64_t token);
+void FSPostDragCancel(FSPostDragState *state);
 
 /* Only a DOWN confirmed to be in a protected title bar starts suppression.
    Content drags remain allowed even when they later cross a title bar. */

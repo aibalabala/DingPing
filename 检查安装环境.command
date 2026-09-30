@@ -16,7 +16,7 @@ finish() {
   exit "$result"
 }
 trap finish EXIT
-echo "定屏 v0.6.0 安装环境诊断"
+echo "定屏 v0.7.0 安装环境诊断"
 /usr/bin/sw_vers
 /usr/bin/uname -m
 /usr/bin/xcode-select -p

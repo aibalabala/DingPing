@@ -32,6 +32,10 @@ echo "[1/4] 检查分区、拖动和自动归位规则"
   "$project_dir/Sources/BindingPolicy.c" "$project_dir/Tests/binding_policy_tests.c" \
   -o "$build_dir/binding_policy_tests"
 "$build_dir/binding_policy_tests"
+/usr/bin/xcrun clang -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=13.0 \
+  -framework Foundation "$project_dir/Sources/BindingStore.m" "$project_dir/Tests/binding_store_tests.m" \
+  -o "$build_dir/binding_store_tests"
+"$build_dir/binding_store_tests"
 /bin/bash "$project_dir/Tests/shell_messages_test.sh"
 
 echo "[2/4] 编译当前 Mac 架构的原生程序"
@@ -46,7 +50,7 @@ echo "[2/4] 编译当前 Mac 架构的原生程序"
 /usr/bin/xcrun clang -fobjc-arc -fblocks -O2 -Wall -Wextra -Wno-unused-parameter \
   -Wno-deprecated-declarations -mmacosx-version-min=13.0 \
   -framework Cocoa -framework ApplicationServices -framework Carbon -framework CoreGraphics \
-  "$project_dir/Sources/main.m" "$project_dir/Sources/WindowAccess.m" "$project_dir/Sources/DragGuard.m" "$project_dir/Sources/FocusObserver.m" \
+  "$project_dir/Sources/main.m" "$project_dir/Sources/WindowAccess.m" "$project_dir/Sources/DragGuard.m" "$project_dir/Sources/FocusObserver.m" "$project_dir/Sources/BindingStore.m" \
   "$build_dir/Layout.o" "$build_dir/DragPolicy.o" "$build_dir/PlacementPolicy.o" "$build_dir/BindingPolicy.o" \
   -o "$app_dir/Contents/MacOS/DingPing"
 

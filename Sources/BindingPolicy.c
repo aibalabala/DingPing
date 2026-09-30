@@ -46,6 +46,17 @@ unsigned FSBindingPlan(const FSBindingSlot *slots,int slotCount,
             result[i]=index;windows[index].used=true;owners|=1u<<i;
         }
     }
+    /* A fixed target may be absent while another window temporarily uses its
+       zone. Keep that live occupant in place until the owner returns. This
+       also preserves a user's explicit drag into a borrowed zone when the
+       resolver runs immediately after the drop. */
+    for(int i=0;i<slotCount;i++)if(slots[i].pinned && slots[i].borrowed && result[i]<0) {
+        int index=slots[i].previous;
+        if(index>=0 && (size_t)index<windowCount && !windows[index].used &&
+           windows[index].restorable && windows[index].visibleOnTarget) {
+            result[i]=index;windows[index].used=true;
+        }
+    }
     for(int i=0;i<slotCount;i++)if(!slots[i].pinned) {
         int index=slots[i].previous;
         if(index<0 || (size_t)index>=windowCount || windows[index].used ||

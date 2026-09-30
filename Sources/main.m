@@ -3,13 +3,14 @@
 #import "WindowAccess.h"
 #import "DragGuard.h"
 #import "FocusObserver.h"
+#import "BindingStore.h"
 #include "DragPolicy.h"
 #include "PlacementPolicy.h"
 #include "BindingPolicy.h"
 #include <math.h>
 #include <unistd.h>
 
-static NSString *const FSVersion=@"0.6.0";
+static NSString *const FSVersion=@"0.7.0";
 static NSArray<NSString *> *layoutNames(void) {
     return @[@"左右两栏",@"三列等分",@"左主窗口＋右侧上下",@"四格布局",@"上下两栏",@"填满可用区域",
              @"左侧上下＋右主窗口",@"上主窗口＋下方左右",@"三行等分",@"左主窗口＋右侧三行"];
@@ -32,9 +33,9 @@ static NSArray<NSDictionary *> *quickPresets(void) {
 }
 static NSRect nsrect(FSRect r) { return NSMakeRect(r.x,r.y,r.width,r.height); }
 static FSRect fsrect(NSRect r) { return (FSRect){r.origin.x,r.origin.y,r.size.width,r.size.height}; }
-static NSMutableDictionary *FSWindowBinding(FSWindow *window, BOOL pinned) {
+static NSMutableDictionary *FSWindowBinding(FSWindow *window) {
     NSMutableDictionary *binding=[@{@"bundle":window.bundleID,@"app":window.appName,
-                                   @"title":window.title,@"pinned":@(pinned)} mutableCopy];
+                                   @"title":window.title} mutableCopy];
     if(window.document.length)binding[@"document"]=window.document;
     return binding;
 }
@@ -224,6 +225,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
     EventHotKeyRef _hotKeys[15];
     EventHandlerRef _hotHandler;
     FSPlacementState _placement;
+    FSPostDragState _postDrag;
 }
 @property(nonatomic,strong) NSStatusItem *statusItem;
 @property(nonatomic,strong) NSWindow *settingsWindow;
@@ -246,6 +248,12 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 @property(nonatomic,strong) id localInputMonitor;
 @property(nonatomic,strong) FSWindow *observedWindow;
 @property(nonatomic,copy) NSArray<FSDragSnapshot *> *dragSnapshots;
+@property(nonatomic,copy) NSArray<FSDragSnapshot *> *pendingDropSnapshots;
+@property(nonatomic,copy) NSString *pendingDropProfileID;
+@property(nonatomic) NSUInteger pendingDropEpoch;
+@property(nonatomic) NSTimeInterval pendingDropReadyAt;
+@property(nonatomic) CGPoint pendingDropPoint;
+@property(nonatomic) CGPoint pendingDropStart;
 @property(nonatomic,strong) NSPanel *dragOverlay;
 @property(nonatomic,strong) FSDragOverlayView *dragOverlayView;
 @property(nonatomic) BOOL dragMotionSeen;
@@ -343,6 +351,7 @@ static NSImage *layoutIcon(NSDictionary *preset) {
 - (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point
                startedAt:(CGPoint)startPoint profile:(NSString *)profileID;
 - (void)clearWindowDrag;
+- (void)completePendingDrop:(uint64_t)token;
 - (void)noteCreatedWindow:(id)element pid:(pid_t)pid;
 - (NSInteger)createdWindowActiveSlot:(FSWindow *)window;
 - (BOOL)slotPinned:(NSInteger)slot;
@@ -370,7 +379,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSString *display=NSScreen.screens.count?FSDisplayID(NSScreen.mainScreen?:NSScreen.screens.firstObject):@"";
     return [@{@"id":NSUUID.UUID.UUIDString,@"name":name,@"display":display,@"layout":@0,
               @"ratio":@.5,@"gap":@8,@"preventDrag":@NO,@"newWindowInActiveSlot":@YES,
-              @"bindings":[NSMutableArray arrayWithObjects:@{},@{},@{},@{},nil]} mutableCopy];
+              @"bindings":[NSMutableArray arrayWithObjects:@{},@{},@{},@{},nil],
+              @"pins":[NSMutableArray arrayWithObjects:@{},@{},@{},@{},nil]} mutableCopy];
 }
 - (NSMutableDictionary *)profile {
     for(NSMutableDictionary *p in self.config[@"profiles"])if([p[@"id"] isEqual:self.config[@"active"]])return p;
@@ -384,14 +394,17 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.configURL=[directory URLByAppendingPathComponent:@"layouts.json"];
     NSData *data=[NSData dataWithContentsOfURL:self.configURL];
     id loaded=data?[NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil]:nil;
-    BOOL valid=[loaded isKindOfClass:NSDictionary.class] && ([loaded[@"version"] isEqual:@1] || [loaded[@"version"] isEqual:@2]) &&
+    BOOL valid=[loaded isKindOfClass:NSDictionary.class] &&
+               ([loaded[@"version"] isEqual:@1] || [loaded[@"version"] isEqual:@2] || [loaded[@"version"] isEqual:@3]) &&
                [loaded[@"profiles"] isKindOfClass:NSArray.class] && [loaded[@"profiles"] count]>0;
     NSMutableArray *profiles=[NSMutableArray new];
     if(valid) for(id candidate in loaded[@"profiles"]) {
         if(![candidate isKindOfClass:NSDictionary.class] || ![candidate[@"id"] isKindOfClass:NSString.class] ||
            ![candidate[@"name"] isKindOfClass:NSString.class] || ![candidate[@"display"] isKindOfClass:NSString.class] ||
            ![candidate[@"layout"] isKindOfClass:NSNumber.class] || ![candidate[@"ratio"] isKindOfClass:NSNumber.class] ||
-           ![candidate[@"gap"] isKindOfClass:NSNumber.class] || ![candidate[@"bindings"] isKindOfClass:NSArray.class]) {valid=NO;break;}
+           ![candidate[@"gap"] isKindOfClass:NSNumber.class] || ![candidate[@"bindings"] isKindOfClass:NSArray.class] ||
+           ([loaded[@"version"] isEqual:@3] && (![candidate[@"pins"] isKindOfClass:NSArray.class] ||
+              [candidate[@"pins"] count]!=4))) {valid=NO;break;}
         int layout=[candidate[@"layout"] intValue];
         if(layout<0 || layout>=FSLayoutCount) {valid=NO;break;}
         NSMutableDictionary *p=[candidate mutableCopy];
@@ -400,31 +413,27 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
             @([candidate[@"newWindowInActiveSlot"] boolValue]):@YES;
         p[@"ratio"]=@(fmin(.8,fmax(.2,[p[@"ratio"] doubleValue])));
         p[@"gap"]=@(fmin(40,fmax(0,[p[@"gap"] doubleValue])));
-        NSMutableArray *bindings=[NSMutableArray new];
-        for(NSUInteger i=0;i<4;i++) {
-            id b=i<[candidate[@"bindings"] count]?candidate[@"bindings"][i]:@{};
-            if([b isKindOfClass:NSDictionary.class] && [b[@"bundle"] isKindOfClass:NSString.class] &&
-               [b[@"title"] isKindOfClass:NSString.class] && [b[@"app"] isKindOfClass:NSString.class])
-                [bindings addObject:[b mutableCopy]];
-            else [bindings addObject:[NSMutableDictionary new]];
-            if([bindings[i][@"bundle"] length])bindings[i][@"pinned"]=@([bindings[i][@"pinned"] isEqual:@YES]);
-            else [bindings[i] removeObjectForKey:@"pinned"];
-        }
-        p[@"bindings"]=bindings; [profiles addObject:p];
+        FSProfileNormalize(p,![loaded[@"version"] isEqual:@3]);[profiles addObject:p];
     }
     if(valid) {
         NSString *active=[loaded[@"active"] isKindOfClass:NSString.class]?loaded[@"active"]:profiles.firstObject[@"id"];
-        BOOL automatic=[loaded[@"version"] isEqual:@2]?[loaded[@"mode"] isEqual:@"auto"]:[loaded[@"locked"] isEqual:@YES];
-        self.config=[@{@"version":@2,@"active":active,@"profiles":profiles,@"mode":automatic?@"auto":@"free"} mutableCopy];
+        BOOL automatic=[loaded[@"version"] isEqual:@1]?[loaded[@"locked"] isEqual:@YES]:[loaded[@"mode"] isEqual:@"auto"];
+        self.config=[@{@"version":@3,@"active":active,@"profiles":profiles,@"mode":automatic?@"auto":@"free"} mutableCopy];
         if([loaded[@"version"] isEqual:@1]) {
             NSURL *backup=[directory URLByAppendingPathComponent:@"layouts-before-0.4.0.json"];
             if(![[NSFileManager defaultManager] fileExistsAtPath:backup.path] && ![data writeToURL:backup atomically:YES]) {
                 self.saveBlocked=YES;self.statusText=@"旧配置备份失败：本次修改暂不保存，原配置仍保留。";
             }
         }
+        if(data && ![loaded[@"version"] isEqual:@3]) {
+            NSURL *backup=[directory URLByAppendingPathComponent:@"layouts-before-0.7.0.json"];
+            if(![[NSFileManager defaultManager] fileExistsAtPath:backup.path] && ![data writeToURL:backup atomically:YES]) {
+                self.saveBlocked=YES;self.statusText=@"固定目标迁移备份失败：本次修改暂不保存，原配置仍保留。";
+            }
+        }
     } else {
         NSMutableDictionary *p=[self newProfile:@"默认方案"];
-        self.config=[@{@"version":@2,@"active":p[@"id"],@"profiles":[NSMutableArray arrayWithObject:p],@"mode":@"free"} mutableCopy];
+        self.config=[@{@"version":@3,@"active":p[@"id"],@"profiles":[NSMutableArray arrayWithObject:p],@"mode":@"free"} mutableCopy];
         if(data) {
             self.saveBlocked=YES;
             self.statusText=@"配置文件格式异常：原文件已保留，本次修改暂不保存。请从菜单打开配置文件夹，移走 layouts.json 后重启。";
@@ -544,6 +553,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [self showSettings:nil];return YES;
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    FSPostDragCancel(&_postDrag);self.pendingDropSnapshots=nil;
     [self cancelActivation];[self.focusObserver stop];
     if(self.inputMonitor)[NSEvent removeMonitor:self.inputMonitor];
     if(self.localInputMonitor)[NSEvent removeMonitor:self.localInputMonitor];
@@ -562,20 +572,19 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     else [self.focusObserver stop];
     [self scheduleAutomaticPlacement];
 }
-- (void)spaceChanged:(NSNotification *)note { [self cancelActivation];[self finishPicking];self.quietUntil=NSDate.timeIntervalSinceReferenceDate+1.8; }
-- (void)willSleep:(NSNotification *)note { [self cancelActivation];[self finishPicking];self.sleeping=YES; }
+- (void)spaceChanged:(NSNotification *)note { FSPostDragCancel(&_postDrag);self.pendingDropSnapshots=nil;[self cancelActivation];[self finishPicking];self.quietUntil=NSDate.timeIntervalSinceReferenceDate+1.8; }
+- (void)willSleep:(NSNotification *)note { FSPostDragCancel(&_postDrag);self.pendingDropSnapshots=nil;[self cancelActivation];[self finishPicking];self.sleeping=YES; }
 - (void)didWake:(NSNotification *)note { self.sleeping=NO;self.quietUntil=NSDate.timeIntervalSinceReferenceDate+3;[self resetTracking:NO]; }
-- (void)sessionResigned:(NSNotification *)note {[self cancelActivation];[self finishPicking];self.sessionInactive=YES;}
+- (void)sessionResigned:(NSNotification *)note {FSPostDragCancel(&_postDrag);self.pendingDropSnapshots=nil;[self cancelActivation];[self finishPicking];self.sessionInactive=YES;}
 - (void)sessionBecameActive:(NSNotification *)note {self.sessionInactive=NO;self.quietUntil=NSDate.timeIntervalSinceReferenceDate+2;}
 - (void)screensChanged:(NSNotification *)note {
+    FSPostDragCancel(&_postDrag);self.pendingDropSnapshots=nil;
     [self cancelActivation];
     self.quietUntil=NSDate.timeIntervalSinceReferenceDate+2; [self resetTracking:NO];
     [self refreshControls];
 }
 
 - (void)cancelActivation {
-    if([self.lastDragResult isEqual:@"已收到拖动，等待目标窗口完成移动"])
-        self.lastDragResult=@"拖动后的布局/菜单操作取消了此次换位；请松开鼠标后稍等片刻再操作菜单";
     FSPlacementCancelSwitch(&_placement);
     self.focusGeneration++;self.observedWindow=nil;
     [self clearWindowDrag];
@@ -594,30 +603,28 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(history.count>96)[history removeObjectAtIndex:0];
 }
 - (BOOL)slotPinned:(NSInteger)slot {
-    return slot>=0 && slot<4 && [self.profile[@"bindings"][slot][@"pinned"] boolValue];
+    return [FSProfilePin(self.profile,slot)[@"bundle"] length]>0;
 }
 - (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot {
     [self storeWindow:window slot:slot manual:NO];
 }
 - (void)storeWindow:(FSWindow *)window slot:(NSInteger)slot manual:(BOOL)manual {
     if(slot<0 || slot>=4)return;
-    NSMutableArray *bindings=self.profile[@"bindings"];
     FSWindow *previous=self.runtime[@(slot)];
     if(previous)[self rememberAssignment:previous slot:slot];
     if(window) {
-        BOOL pinned=[self slotPinned:slot];
         for(int i=0;i<4;i++)if(i!=slot && [window sameWindow:self.runtime[@(i)]]) {
-            if(![self slotPinned:i] || (manual && ![self.borrowedSlots containsIndex:i]))
-                bindings[i]=[NSMutableDictionary new];
+            FSProfileSetOccupant(self.profile,i,@{});
             [self.runtime removeObjectForKey:@(i)];[self.borrowedSlots removeIndex:i];
         }
-        if(!pinned || manual || (previous && [window sameWindow:previous] &&
-                                  ![self.borrowedSlots containsIndex:slot])) {
-            bindings[slot]=FSWindowBinding(window,pinned);
+        BOOL owned=[self slotPinned:slot] && previous && [window sameWindow:previous] &&
+                   ![self.borrowedSlots containsIndex:slot];
+        FSProfileSetOccupant(self.profile,slot,FSWindowBinding(window));
+        if(![self slotPinned:slot] || manual || owned)
             [self.borrowedSlots removeIndex:slot];
-        } else [self.borrowedSlots addIndex:slot];
+        else [self.borrowedSlots addIndex:slot];
         self.runtime[@(slot)]=window;[self rememberAssignment:window slot:slot];
-    } else {bindings[slot]=[NSMutableDictionary new];[self.runtime removeObjectForKey:@(slot)];
+    } else {FSProfileSetOccupant(self.profile,slot,@{});[self.runtime removeObjectForKey:@(slot)];
             [self.borrowedSlots removeIndex:slot];}
 }
 - (void)noteCreatedWindow:(id)element pid:(pid_t)pid {
@@ -731,7 +738,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     if(source>=0)sourcePinned=(pinned & (1u<<source))!=0;
     for(int i=count;i<4 && !sourcePinned;i++)if([self slotPinned:i]) {
-        FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=self.profile[@"bindings"][i];
+        FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=FSProfilePin(self.profile,i);
         sourcePinned=(hidden && [moving sameWindow:hidden]) ||
             (!hidden && [moving.bundleID isEqual:binding[@"bundle"]] && [moving.title isEqual:binding[@"title"]]);
     }
@@ -774,25 +781,40 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     CGPoint point=mouseAXPoint(event);
     self.lastMouseDown=NSDate.timeIntervalSinceReferenceDate;
     self.quietUntil=self.lastMouseDown+.8;
+    if(_postDrag.pending)[self completePendingDrop:_postDrag.token];
+    self.pendingDropSnapshots=snapshots;self.pendingDropProfileID=profileID;
+    self.pendingDropStart=startPoint;self.pendingDropPoint=point;
+    self.pendingDropEpoch=self.epoch;
+    self.pendingDropReadyAt=NSDate.timeIntervalSinceReferenceDate+.12;
     self.lastDragResult=@"已收到拖动，等待目标窗口完成移动";
-    NSUInteger generation=self.dragGeneration;
+    uint64_t token=FSPostDragArm(&_postDrag);
     __weak FSApp *weakSelf=self;
     /* A global event monitor runs asynchronously. Let the target app complete
        the move before reading its accessibility frame and reassigning zones. */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(.12*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         FSApp *app=weakSelf;
-        if(app && app.dragGeneration==generation)
-            [app commitWindowDrag:snapshots at:point startedAt:startPoint profile:profileID];
-        else if(app && [app.lastDragResult isEqual:@"已收到拖动，等待目标窗口完成移动"])
-            app.lastDragResult=@"拖放判定被后续操作取消；请松手后再打开菜单";
+        [weakSelf completePendingDrop:token];
     });
+}
+- (void)completePendingDrop:(uint64_t)token {
+    if(!FSPostDragTake(&_postDrag,token))return;
+    NSArray *snapshots=self.pendingDropSnapshots;
+    NSString *profileID=self.pendingDropProfileID;
+    CGPoint point=self.pendingDropPoint,start=self.pendingDropStart;
+    NSUInteger epoch=self.pendingDropEpoch;
+    self.pendingDropSnapshots=nil;self.pendingDropProfileID=nil;
+    if(epoch!=self.epoch) {
+        self.lastDragResult=@"布局在松手后已改变，本次拖放未换位";
+        return;
+    }
+    [self commitWindowDrag:snapshots at:point startedAt:start profile:profileID];
 }
 - (void)commitWindowDrag:(NSArray<FSDragSnapshot *> *)snapshots at:(CGPoint)point
                startedAt:(CGPoint)startPoint profile:(NSString *)profileID {
     if(!self.locked || _placement.switching || [self.profile[@"preventDrag"] boolValue] ||
-       ![profileID isEqual:self.profile[@"id"]] || self.choosingWindow || self.menuOpen ||
-       self.sleeping || self.sessionInactive || NSApp.modalWindow || !AXIsProcessTrusted()) {
-        self.lastDragResult=@"松手后模式或菜单状态改变，本次未换位；请在自动分屏模式下重新拖动";
+       ![profileID isEqual:self.profile[@"id"]] || self.choosingWindow ||
+       self.sleeping || self.sessionInactive || !AXIsProcessTrusted()) {
+        self.lastDragResult=@"松手后模式、布局或桌面改变，本次未换位";
         return;
     }
     FSWindow *window=nil;FSRect start={0},actual={0};BOOL pointerOnly=NO;
@@ -837,7 +859,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     if(destination<0){self.lastDragResult=@"松手位置在分区外，原分区保持不变";return;}
     /* A pin in a temporarily hidden zone still owns its exact window. */
     for(int i=count;i<4;i++)if([self slotPinned:i]) {
-        FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=self.profile[@"bindings"][i];
+        FSWindow *hidden=self.runtime[@(i)];NSDictionary *binding=FSProfilePin(self.profile,i);
         if((hidden && [window sameWindow:hidden]) ||
            (!hidden && [window.bundleID isEqual:binding[@"bundle"]] && [window.title isEqual:binding[@"title"]])) {
             self.lastDragResult=@"窗口固定在当前布局未显示的分区，未换位";
@@ -918,7 +940,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
        changing from four zones to two. Explicit manual reassignment can move it. */
     for(int i=self.zoneCount;i<4;i++)if([self slotPinned:i]) {
         FSWindow *hidden=self.runtime[@(i)];
-        NSDictionary *binding=self.profile[@"bindings"][i];
+        NSDictionary *binding=FSProfilePin(self.profile,i);
         FSRect hiddenFrame;
         BOOL alive=hidden && [hidden readFrame:&hiddenFrame] &&
                    [NSRunningApplication runningApplicationWithProcessIdentifier:hidden.pid];
@@ -984,7 +1006,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         FSRect frame;if(![window readFrame:&frame] || FSScreenForFrame(frame)!=screen)continue;
         BOOL hiddenPin=NO;
         for(int i=self.zoneCount;i<4;i++)if([self slotPinned:i]) {
-            FSWindow *saved=self.runtime[@(i)];NSDictionary *b=self.profile[@"bindings"][i];
+            FSWindow *saved=self.runtime[@(i)];NSDictionary *b=FSProfilePin(self.profile,i);
             FSRect savedFrame;
             BOOL alive=saved && [saved readFrame:&savedFrame] &&
                        [NSRunningApplication runningApplicationWithProcessIdentifier:saved.pid];
@@ -1019,7 +1041,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     uint64_t token=FSPlacementBeginSwitch(&_placement);
     NSMutableSet *bundles=[NSMutableSet new];
     for(int i=0;i<self.zoneCount;i++) {
-        NSString *bundle=self.profile[@"bindings"][i][@"bundle"];if(bundle.length)[bundles addObject:bundle];
+        NSString *bundle=([self slotPinned:i]?FSProfilePin(self.profile,i):FSProfileOccupant(self.profile,i))[@"bundle"];
+        if(bundle.length)[bundles addObject:bundle];
     }
     [self resolveBindings:YES available:FSRestorableWindows(bundles)];
     if(seedEmpty)[self seedEmptySlots];
@@ -1175,7 +1198,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSMenuItem *unpin=[self item:@"取消分区固定" action:NULL value:nil];NSMenu *unpinMenu=[NSMenu new];
     for(int i=0;i<self.zoneCount;i++)if([self slotPinned:i])
         [unpinMenu addItem:[self item:[NSString stringWithFormat:@"%d · %@ · %@",i+1,positions[i],
-                           self.profile[@"bindings"][i][@"app"]] action:@selector(unpinFromMenu:) value:@(i)]];
+                           FSProfilePin(self.profile,i)[@"app"]] action:@selector(unpinFromMenu:) value:@(i)]];
     if(unpinMenu.numberOfItems==0)[unpinMenu addItem:[self item:@"当前没有固定的窗口" action:NULL value:nil]];
     unpin.submenu=unpinMenu;[menu addItem:unpin];
     [menu addItem:NSMenuItem.separatorItem];
@@ -1287,7 +1310,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
 
     [v addSubview:label(@"分区中的窗口",NSMakeRect(26,399,180,21),14,YES)];
     self.fillButton=button(@"填入空位",NSMakeRect(650,395,146,28),self,@selector(autoFill:));
-    self.fillButton.toolTip=@"仅填未绑定且未固定的分区。";[v addSubview:self.fillButton];
+    self.fillButton.toolTip=@"为没有窗口的分区找可用窗口；固定目标暂时不在时，可以临时补位。";[v addSubview:self.fillButton];
     NSButton *refresh=button(@"更新窗口列表",NSMakeRect(807,395,149,28),self,@selector(refreshWindowList:));
     [v addSubview:refresh];
     self.bindingLabels=[NSMutableArray new];self.bindingPopups=[NSMutableArray new];
@@ -1302,7 +1325,7 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
         pick.tag=i;pick.toolTip=@"12 秒内点击目标窗口标题栏空白处。";[v addSubview:pick];[self.pickButtons addObject:pick];
         NSButton *pin=[NSButton checkboxWithTitle:@"固定此窗口" target:self action:@selector(togglePin:)];
         pin.frame=NSMakeRect(813,y+2,143,25);pin.tag=i;
-        pin.toolTip=@"固定后为此窗口保留分区；即使窗口暂时关闭，也不自动换成别的窗口。";
+        pin.toolTip=@"保存固定目标；目标暂时不在时允许临时补位，回来后自动收回。";
         [v addSubview:pin];[self.pinButtons addObject:pin];
     }
     [v addSubview:label(@"拖动规则",NSMakeRect(26,568,114,22),11,YES)];
@@ -1411,7 +1434,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.fillButton.enabled=trusted && connected && vacant && !self.choosingWindow;
     for(NSButton *b in self.pickButtons)b.enabled=trusted && connected && b.tag<self.zoneCount && !self.choosingWindow;
     for(NSButton *b in self.pinButtons)b.enabled=b.tag<self.zoneCount &&
-        [self.profile[@"bindings"][b.tag][@"bundle"] length]>0 && !self.choosingWindow;
+        ([FSProfileOccupant(self.profile,b.tag)[@"bundle"] length]>0 || [self slotPinned:b.tag]) &&
+        !self.choosingWindow;
     self.lockModePopup.enabled=!self.choosingWindow;
     self.preview.freeMode=!self.locked;self.preview.activeSlot=_placement.lastSlot;self.preview.needsDisplay=YES;
     if(!self.locked)self.guardStatusLabel.stringValue=@"自由模式 · 不固定窗口";
@@ -1496,17 +1520,21 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     NSMutableArray *names=[NSMutableArray new];
     NSArray *positions=positionNames(kind);
     for(int i=0;i<4;i++) {
-        NSPopUpButton *popup=self.bindingPopups[i];NSDictionary *binding=p[@"bindings"][i];
+        NSPopUpButton *popup=self.bindingPopups[i];NSDictionary *binding=FSProfileOccupant(p,i);
+        NSDictionary *pin=FSProfilePin(p,i);
         BOOL enabled=i<self.zoneCount;
         popup.enabled=enabled;self.bindingLabels[i].textColor=enabled?NSColor.labelColor:NSColor.tertiaryLabelColor;
         self.bindingLabels[i].stringValue=enabled?[NSString stringWithFormat:@"%d · %@",i+1,positions[i]]:[NSString stringWithFormat:@"%d · 未使用",i+1];
         self.pinButtons[i].state=[self slotPinned:i]?NSControlStateValueOn:NSControlStateValueOff;
         self.pinButtons[i].title=[self slotPinned:i]?@"已固定 · 可取消":@"固定此窗口";
-        [popup removeAllItems];[popup addItemWithTitle:enabled?@"空闲分区 / 清空此区域":@"此布局未使用该区域"];
-        if(binding[@"bundle"]) {
-            NSString *state=[self slotPinned:i]?[self.borrowedSlots containsIndex:i]?@"固定目标暂缺":@"固定":
-                (enabled?(AXIsProcessTrusted()?@"暂不可见":@"已保存"):@"已保留");
-            [popup addItemWithTitle:[NSString stringWithFormat:@"%@ · %@ — %@",state,binding[@"app"],binding[@"title"]]];
+        [popup removeAllItems];[popup addItemWithTitle:enabled?
+            ([self slotPinned:i]?@"固定中 · 先取消固定才能清空":@"空闲分区 / 清空此区域"):
+            @"此布局未使用该区域"];
+        if(pin[@"bundle"]) {
+            [popup addItemWithTitle:[NSString stringWithFormat:@"固定目标 · %@ — %@",pin[@"app"],pin[@"title"]]];
+            popup.lastItem.representedObject=@"saved";[popup selectItem:popup.lastItem];
+        } else if(binding[@"bundle"]) {
+            [popup addItemWithTitle:[NSString stringWithFormat:@"上次占位 · %@ — %@",binding[@"app"],binding[@"title"]]];
             popup.lastItem.representedObject=@"saved";[popup selectItem:popup.lastItem];
         }
         for(FSWindow *w in self.windowChoices) {
@@ -1520,9 +1548,9 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
             }
         }
         FSWindow *occupant=self.runtime[@(i)];
-        NSString *name=enabled?(occupant.appName?:binding[@"app"]?:@""):@"";
+        NSString *name=enabled?(occupant.appName?:pin[@"app"]?:binding[@"app"]?:@""):@"";
         if(enabled && [self.borrowedSlots containsIndex:i])
-            name=[NSString stringWithFormat:@"🔒 %@ 暂缺 · %@ 代用",binding[@"app"],occupant.appName];
+            name=[NSString stringWithFormat:@"🔒 %@ 暂缺 · %@ 代用",pin[@"app"],occupant.appName];
         else if([self slotPinned:i] && enabled)name=[@"🔒 " stringByAppendingString:name];
         [names addObject:name];
     }
@@ -1581,11 +1609,10 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     [self cancelActivation];[self finishPicking];[self resolveBindings:YES];
     NSArray *old=[self.profile[@"bindings"] copy];NSDictionary *previous=[self.runtime copy];
-    NSMutableArray *bindings=self.profile[@"bindings"];
     for(NSUInteger index=0;index<freeSlots.count;index++) {
         NSInteger slot=freeSlots[index].integerValue;
         NSInteger source=freeSlots[(index+freeSlots.count-1)%freeSlots.count].integerValue;
-        bindings[slot]=[old[source] mutableCopy];
+        FSProfileSetOccupant(self.profile,slot,old[source]);
         if(previous[@(source)])self.runtime[@(slot)]=previous[@(source)];
         else [self.runtime removeObjectForKey:@(slot)];
         [self rememberAssignment:self.runtime[@(slot)] slot:slot];
@@ -1778,30 +1805,58 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [self setMessage:@"方案已删除，已回到自由模式。选择布局即可重新开始。"];
 }
 
-- (void)bindWindow:(FSWindow *)window slot:(NSInteger)slot {
-    if(slot<0 || slot>=self.zoneCount)return;
+- (BOOL)bindWindow:(FSWindow *)window slot:(NSInteger)slot {
+    if(slot<0 || slot>=self.zoneCount)return NO;
+    if(!window && [self slotPinned:slot]) {
+        [self setMessage:[NSString stringWithFormat:@"区域 %ld 仍固定给 %@。要清空此固定目标，请先点「已固定 · 可取消」。",
+            (long)slot+1,FSProfilePin(self.profile,slot)[@"app"]]];
+        [self refreshControls];return NO;
+    }
+    NSDictionary *pin=FSProfilePin(self.profile,slot);
+    BOOL sameOwner=window && [window.bundleID isEqual:pin[@"bundle"]] &&
+        ((window.document.length && [window.document isEqual:pin[@"document"]]) ||
+         [window.title isEqual:pin[@"title"]] ||
+         (![self.borrowedSlots containsIndex:slot] && [window sameWindow:self.runtime[@(slot)]]));
+    if(window && [self slotPinned:slot] && !sameOwner) {
+        NSAlert *alert=[NSAlert new];
+        alert.messageText=[NSString stringWithFormat:@"替换区域 %ld 的固定窗口？",(long)slot+1];
+        alert.informativeText=[NSString stringWithFormat:@"当前固定给 %@。确认后才会改为 %@。",pin[@"app"],window.appName];
+        [alert addButtonWithTitle:@"替换固定目标"];
+        [alert addButtonWithTitle:@"取消"];
+        if([alert runModal]!=NSAlertFirstButtonReturn){[self refreshControls];return NO;}
+    }
+    NSInteger previousOwner=-1;
+    if(window)for(int i=0;i<4;i++)if(i!=slot && [self slotPinned:i] &&
+        ![self.borrowedSlots containsIndex:i] && [window sameWindow:self.runtime[@(i)]]) {
+        previousOwner=i;break;
+    }
+    BOOL destinationPinned=[self slotPinned:slot];
     [self cancelActivation];[self storeWindow:window slot:slot manual:YES];_placement.lastSlot=(int)slot;
+    if(previousOwner>=0)FSProfileSetPin(self.profile,previousOwner,@{});
+    if(window && (destinationPinned || previousOwner>=0))
+        FSProfileSetPin(self.profile,slot,FSWindowBinding(window));
     [self resetTracking:NO];[self saveConfig];
     if(self.locked && window)[self arrangeSlot:slot manual:YES];
     [self refreshControls];[self syncDragGuard:YES];
     if(![self.suspended containsIndex:slot])[self setMessage:window?[NSString stringWithFormat:@"%@ 已放入区域 %ld。%@",window.appName,(long)slot+1,self.locked?@"":@"自由模式中只保存选择，尚未移动。"]:@"分区已清空，原窗口仍然打开。"];
+    return YES;
 }
 - (void)togglePin:(NSButton *)sender {
     if(self.refreshing || sender.tag<0 || sender.tag>=self.zoneCount)return;
-    NSMutableDictionary *binding=self.profile[@"bindings"][sender.tag];
-    if(![binding[@"bundle"] length]) {
+    BOOL pinned=sender.state==NSControlStateValueOn;
+    NSDictionary *candidate=self.runtime[@(sender.tag)]?FSWindowBinding(self.runtime[@(sender.tag)]):
+                            FSProfileOccupant(self.profile,sender.tag);
+    if(pinned && ![candidate[@"bundle"] length]) {
         [self setMessage:@"请先在该分区选择一个窗口，再点「固定此窗口」。"];
         [self refreshControls];return;
     }
-    BOOL pinned=sender.state==NSControlStateValueOn;
-    binding[@"pinned"]=@(pinned);
-    if(!pinned && [self.borrowedSlots containsIndex:sender.tag] && self.runtime[@(sender.tag)])
-        self.profile[@"bindings"][sender.tag]=FSWindowBinding(self.runtime[@(sender.tag)],NO);
+    NSString *name=pinned?candidate[@"app"]:FSProfilePin(self.profile,sender.tag)[@"app"];
+    FSProfileSetPin(self.profile,sender.tag,pinned?candidate:@{});
     [self.borrowedSlots removeIndex:sender.tag];
     [self resetTracking:NO];[self saveConfig];[self refreshControls];
     [self setMessage:pinned?
-      [NSString stringWithFormat:@"%@ 固定在区域 %ld；它暂时不在时，其他窗口可临时补位。",binding[@"app"],(long)sender.tag+1]:
-      [NSString stringWithFormat:@"区域 %ld 已取消保留；新窗口可以自动进入。",(long)sender.tag+1]];
+      [NSString stringWithFormat:@"%@ 固定在区域 %ld；它暂时不在时，其他窗口可临时补位。",name,(long)sender.tag+1]:
+      [NSString stringWithFormat:@"区域 %ld 的 %@ 已取消固定；新窗口可以自动进入。",(long)sender.tag+1,name]];
 }
 - (void)bindingChanged:(NSPopUpButton *)sender {
     if(self.refreshing)return;
@@ -1816,16 +1871,14 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     pid_t pid=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
     FSWindow *window=FSFocusedWindow(pid==getpid()?self.lastExternalPID:pid);
     if(!window){[self setMessage:@"先点击要固定的普通窗口，再打开菜单选择固定位置。"];NSBeep();return;}
-    [self bindWindow:window slot:slot];
-    self.profile[@"bindings"][slot][@"pinned"]=@YES;[self saveConfig];[self refreshControls];
+    if(![self bindWindow:window slot:slot])return;
+    FSProfileSetPin(self.profile,slot,FSWindowBinding(window));[self saveConfig];[self refreshControls];
     [self setMessage:[NSString stringWithFormat:@"已将 %@ 固定在区域 %ld；暂时关闭时允许其他窗口临时补位。",window.appName,(long)slot+1]];
 }
 - (void)unpinFromMenu:(NSMenuItem *)sender {
     NSInteger slot=[sender.representedObject integerValue];
     if(slot<0 || slot>=self.zoneCount)return;
-    if([self.borrowedSlots containsIndex:slot] && self.runtime[@(slot)])
-        self.profile[@"bindings"][slot]=FSWindowBinding(self.runtime[@(slot)],NO);
-    [self.profile[@"bindings"][slot] removeObjectForKey:@"pinned"];
+    FSProfileSetPin(self.profile,slot,@{});
     [self.borrowedSlots removeIndex:slot];
     [self saveConfig];[self refreshControls];
     [self setMessage:[NSString stringWithFormat:@"区域 %ld 已取消固定。",(long)slot+1]];
@@ -1854,8 +1907,12 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     self.lastResolve=now;
     NSArray<FSWindow *> *visible=FSAvailableWindows();
     NSMutableSet<NSString *> *bundles=[NSMutableSet new];
-    for(int i=0;i<4;i++)if([self.profile[@"bindings"][i][@"bundle"] length])
-        [bundles addObject:self.profile[@"bindings"][i][@"bundle"]];
+    for(int i=0;i<4;i++) {
+        NSString *saved=FSProfileOccupant(self.profile,i)[@"bundle"];
+        NSString *fixed=FSProfilePin(self.profile,i)[@"bundle"];
+        if(saved.length)[bundles addObject:saved];
+        if(fixed.length)[bundles addObject:fixed];
+    }
     NSMutableArray<FSWindow *> *windows=[visible mutableCopy];
     for(FSWindow *w in (available?:FSRestorableWindows(bundles))) {
         BOOL seen=NO;for(FSWindow *other in windows)if([w sameWindow:other]){seen=YES;break;}
@@ -1880,7 +1937,8 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     }
     FSBindingSlot slots[4]={0};
     for(int i=0;i<self.zoneCount;i++) {
-        NSDictionary *b=self.profile[@"bindings"][i];int previousIndex=-1;
+        NSDictionary *b=[self slotPinned:i]?FSProfilePin(self.profile,i):FSProfileOccupant(self.profile,i);
+        int previousIndex=-1;
         for(NSUInteger index=0;index<windows.count;index++)if([previous[@(i)] sameWindow:windows[index]]) {
             previousIndex=(int)index;break;
         }
@@ -1907,10 +1965,10 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     BOOL changed=NO;
     for(int i=0;i<self.zoneCount;i++) {
         FSWindow *w=next[@(i)];if(!w)continue;
-        if([self slotPinned:i] && !(owners & (1u<<i))){[self.borrowedSlots addIndex:i];continue;}
-        NSMutableDictionary *replacement=FSWindowBinding(w,[self slotPinned:i]);
-        if(![replacement isEqual:self.profile[@"bindings"][i]]) {
-            self.profile[@"bindings"][i]=replacement;changed=YES;
+        if([self slotPinned:i] && !(owners & (1u<<i)))[self.borrowedSlots addIndex:i];
+        NSMutableDictionary *replacement=FSWindowBinding(w);
+        if(![replacement isEqual:FSProfileOccupant(self.profile,i)]) {
+            FSProfileSetOccupant(self.profile,i,replacement);changed=YES;
         }
     }
     if(changed)[self saveConfig];
@@ -2090,6 +2148,17 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[NSBundle.mainBundle.bundleURL]];
 }
 - (void)showPermissionDiagnostics:(id)sender {
+    /* Opening a status menu is a read-only action. Give the target app its
+       normal mouse-up frame update before reporting this drag's result. */
+    if(_postDrag.pending && NSDate.timeIntervalSinceReferenceDate<self.pendingDropReadyAt) {
+        NSTimeInterval delay=self.pendingDropReadyAt-NSDate.timeIntervalSinceReferenceDate+.02;
+        __weak FSApp *weakSelf=self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            [weakSelf showPermissionDiagnostics:nil];
+        });
+        return;
+    }
+    if(_postDrag.pending)[self completePendingDrop:_postDrag.token];
     [self cancelActivation];
     [self finishPicking];
     BOOL trusted=AXIsProcessTrusted();
@@ -2112,19 +2181,21 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
     FSRect zones[4]={0};
     int zoneCount=screen?FSBuildZones([self.profile[@"layout"] intValue],FSUsableFrame(screen),
         [self.profile[@"ratio"] doubleValue],[self.profile[@"gap"] doubleValue],zones):0;
-    NSMutableSet *pinBundles=[NSMutableSet new];
+    NSMutableSet *pinBundles=[NSMutableSet new];NSUInteger fixedCount=0;
     for(int i=0;i<self.zoneCount;i++)if([self slotPinned:i])
-        [pinBundles addObject:self.profile[@"bindings"][i][@"bundle"]];
+        {[pinBundles addObject:FSProfilePin(self.profile,i)[@"bundle"]];fixedCount++;}
     NSArray<FSWindow *> *pinCandidates=trusted?FSRestorableWindows(pinBundles):@[];
     NSMutableArray<NSString *> *zoneLines=[NSMutableArray new];NSUInteger resolved=0;
     for(int i=0;i<self.zoneCount;i++) {
-        NSDictionary *binding=self.profile[@"bindings"][i];FSWindow *window=self.runtime[@(i)];
-        NSString *saved=[binding[@"app"] length]?binding[@"app"]:@"空";
+        NSDictionary *binding=FSProfileOccupant(self.profile,i);
+        NSDictionary *fixed=FSProfilePin(self.profile,i);
+        FSWindow *window=self.runtime[@(i)];
+        NSString *saved=[fixed[@"app"] length]?fixed[@"app"]:([binding[@"app"] length]?binding[@"app"]:@"空");
         BOOL borrowed=[self.borrowedSlots containsIndex:i];
         NSString *pin=[self slotPinned:i]?(borrowed?@"固定目标缺席 · 临时补位":@"固定"):@"可补位";
         if(!window || ![window isRestorable]) {
             NSUInteger candidates=0;
-            for(FSWindow *candidate in pinCandidates)if([candidate.bundleID isEqual:binding[@"bundle"]])candidates++;
+            for(FSWindow *candidate in pinCandidates)if([candidate.bundleID isEqual:fixed[@"bundle"]])candidates++;
             NSString *detail=[self slotPinned:i]?(candidates>1?
                 [NSString stringWithFormat:@"该应用有 %lu 个普通窗口，标题或文档均无法唯一识别；请重新选择要固定的窗口",(unsigned long)candidates]:
                 (candidates==0?@"该应用当前没有可恢复的普通窗口":@"候选窗口正在恢复，请再点一次布局")):
@@ -2142,19 +2213,20 @@ static OSStatus hotKeyCallback(EventHandlerCallRef next, EventRef event, void *c
             [NSString stringWithFormat:@"目标 %.0f,%.0f %.0f×%.0f；实际 %.0f,%.0f %.0f×%.0f",
                 zones[i].x,zones[i].y,zones[i].width,zones[i].height,
                 actual.x,actual.y,actual.width,actual.height]:@"坐标不可读";
-        NSString *occupant=borrowed?[NSString stringWithFormat:@"%@（目标 %@）",window.appName,saved]:window.appName;
+        NSString *occupant=borrowed?[NSString stringWithFormat:@"当前 %@；固定目标 %@",window.appName,saved]:window.appName;
         [zoneLines addObject:[NSString stringWithFormat:@"%d %@（%@）：%@；%@",i+1,occupant,pin,state,coordinates]];
     }
     NSString *dragStatus=!self.locked?@"自由模式下不换位":
         ([self.profile[@"preventDrag"] boolValue]?@"当前选择阻止标题栏拖动；改为「拖到分区换位」后再试":
          (self.lastDragResult?:@"尚无记录"));
     NSString *diagnostic=[NSString stringWithFormat:
-        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n当前模式：%@；目标显示器：%@\n窗口识别：屏幕普通窗口 %lu；可调整窗口 %lu；目标屏可用 %lu；最近活动窗口 %@\n最近窗口检查：%@\n当前布局：存档 %ld；找到 %lu；等待确认 %lu；已暂停 %lu；鼠标监听 %@\n分区实际位置：\n%@\n拖动规则：%@；拦截器 %@\n最近状态：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
+        @"版本：%@（构建 %@）\n当前进程：%d\n辅助功能检测：%@\n当前模式：%@；目标显示器：%@\n窗口识别：屏幕普通窗口 %lu；可调整窗口 %lu；目标屏可用 %lu；最近活动窗口 %@\n最近窗口检查：%@\n当前布局：存档 %ld；固定目标 %lu；临时补位 %lu；找到 %lu；等待确认 %lu；已暂停 %lu；鼠标监听 %@\n分区实际位置：\n%@\n拖动规则：%@；拦截器 %@\n最近状态：%@\n拖动诊断：%@\n应用标识：%@\n正在运行的应用：\n%@\n\n%@",
         FSVersion,[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]?:@"未知",getpid(),
         trusted?@"已授权":@"未授权",self.locked?@"自动分屏":@"自由模式",screenState,
         (unsigned long)ordinaryRows,(unsigned long)available.count,(unsigned long)availableOnTarget,
         focused?[focused label]:@"未识别",focusDetail,
-        (long)self.boundCount,(unsigned long)resolved,(unsigned long)self.pending.count,
+        (long)self.boundCount,(unsigned long)fixedCount,(unsigned long)self.borrowedSlots.count,
+        (unsigned long)resolved,(unsigned long)self.pending.count,
         (unsigned long)self.suspended.count,self.inputMonitor?@"正常":@"不可用",
         [zoneLines componentsJoinedByString:@"\n"],
         [self.profile[@"preventDrag"] boolValue]?@"阻止拖动":@"拖放换位",

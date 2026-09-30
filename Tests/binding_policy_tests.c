@@ -62,6 +62,28 @@ int main(void) {
     };
     slots[0].previous=0;slots[0].borrowed=false;
     assert((FSBindingPlan(slots,3,live,2,result)&1u)!=0 && result[0]==0);
-    puts("PASS: missing pins borrowed, returning owners reclaim, live identity, title changes and ambiguity.");
+    /* A manual swap puts Terminal in an absent Code pin's borrowed zone.
+       Re-resolving must keep the dragged window, then restore Code later. */
+    FSBindingSlot dragged[]={
+        {.bundle="chrome",.title="browser",.previous=0,.pinned=true},
+        {.bundle="code",.title="editor",.previous=2,.pinned=true,.borrowed=true},
+        {.bundle="finder",.title="files",.previous=1}
+    };
+    FSBindingCandidate afterDrop[]={
+        {.bundle="chrome",.title="browser",.restorable=true,.visibleOnTarget=true},
+        {.bundle="finder",.title="files",.restorable=true,.visibleOnTarget=true},
+        {.bundle="terminal",.title="shell",.restorable=true,.visibleOnTarget=true}
+    };
+    assert(FSBindingPlan(dragged,3,afterDrop,3,result)==1u);
+    assert(result[0]==0 && result[1]==2 && result[2]==1);
+    FSBindingCandidate codeReturns[]={
+        {.bundle="chrome",.title="browser",.restorable=true,.visibleOnTarget=true},
+        {.bundle="finder",.title="files",.restorable=true,.visibleOnTarget=true},
+        {.bundle="terminal",.title="shell",.restorable=true,.visibleOnTarget=true},
+        {.bundle="code",.title="editor",.restorable=true,.visibleOnTarget=true}
+    };
+    assert(FSBindingPlan(dragged,3,codeReturns,4,result)==3u);
+    assert(result[0]==0 && result[1]==3 && result[2]==1);
+    puts("PASS: missing pins borrowed, drag swap stable on resolve, returning owners reclaim, title changes and ambiguity.");
     return 0;
 }

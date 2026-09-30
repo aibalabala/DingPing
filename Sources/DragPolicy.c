@@ -1,6 +1,19 @@
 #include "DragPolicy.h"
 #include <math.h>
 
+uint64_t FSPostDragArm(FSPostDragState *state) {
+    if(!state)return 0;
+    state->token++;state->pending=true;return state->token;
+}
+bool FSPostDragTake(FSPostDragState *state,uint64_t token) {
+    if(!state || !state->pending || token!=state->token)return false;
+    state->pending=false;return true;
+}
+void FSPostDragCancel(FSPostDragState *state) {
+    if(!state)return;
+    state->token++;state->pending=false;
+}
+
 bool FSFilterDrag(FSDragState *state, FSDragEvent event, bool enabled, bool confirmedTitle) {
     if(!state)return false;
     switch(event) {

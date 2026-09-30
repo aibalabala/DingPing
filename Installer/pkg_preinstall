@@ -26,9 +26,9 @@ check_existing() {
     existing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null || true)"
     existing_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null || true)"
     if ! /usr/bin/awk -v old="$existing_version" -v oldbuild="$existing_build" 'BEGIN {
-      n=split(old,a,"."); split("0.6.0",b,".");
+      n=split(old,a,"."); split("0.7.0",b,".");
       for(i=1;i<=3;i++) {if((a[i]+0)>(b[i]+0))exit 1; if((a[i]+0)<(b[i]+0))exit 0;}
-      if(n>3 || (oldbuild+0)>17)exit 1;
+      if(n>3 || (oldbuild+0)>18)exit 1;
     }'; then
       echo "检测到比本安装包更新的版本，已停止：$app" >&2
       exit 1
