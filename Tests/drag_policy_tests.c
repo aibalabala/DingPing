@@ -42,6 +42,12 @@ int main(void) {
     assert(!FSVisibleFrameMatch(w,(FSRect){-720,-1080,1200,850})); /* Neighboring window. */
     assert(!FSVisibleFrameMatch(w,(FSRect){-1440,-1080,3000,2000}));
     assert(!FSVisibleFrameMatch(w,(FSRect){NAN,-1080,1200,850}));
+    FSRect partial={-1440,-1060,1200,500};
+    assert(FSDragWindowMatchScore(w,partial,false)>.9); /* CG reports content only. */
+    assert(FSDragWindowMatchScore(w,(FSRect){200,200,1200,850},false)<0);
+    assert(FSDragWindowMatchScore(w,(FSRect){200,200,1200,850},true)>=2);
+    assert(FSDragUseAXTitleFrame(w,(FSRect){-1440,-700,1200,400},-1300,-1060));
+    assert(!FSDragUseAXTitleFrame(w,(FSRect){-1440,-700,1200,400},-1300,-900));
     FSRect moved={-800,-400,1200,850},resized={-800,-400,800,850};
     assert(FSWindowWasDragged(w,moved));
     assert(!FSWindowWasDragged(w,resized));

@@ -43,6 +43,19 @@ bool FSVisibleFrameMatch(FSRect axWindow,FSRect visibleWindow) {
     return FSIntersectionArea(axWindow,visibleWindow)/fmin(a,b)>=.72;
 }
 
+double FSDragWindowMatchScore(FSRect axWindow,FSRect visibleWindow,bool directHit) {
+    double a=axWindow.width*axWindow.height,b=visibleWindow.width*visibleWindow.height;
+    if(!isfinite(a)||!isfinite(b)||a<=0||b<=0)return -1;
+    double overlap=FSIntersectionArea(axWindow,visibleWindow)/fmin(a,b);
+    if(!isfinite(overlap))return -1;
+    if(!directHit && overlap<.25)return -1;
+    return (directHit?2:0)+overlap;
+}
+
+bool FSDragUseAXTitleFrame(FSRect axWindow,FSRect visibleWindow,double x,double y) {
+    return !FSVisibleFrameMatch(axWindow,visibleWindow) && FSPassiveDragCandidate(axWindow,x,y);
+}
+
 bool FSWindowWasDragged(FSRect before, FSRect after) {
     if(!isfinite(before.x)||!isfinite(before.y)||!isfinite(after.x)||!isfinite(after.y)||
        !isfinite(before.width)||!isfinite(before.height)||!isfinite(after.width)||!isfinite(after.height))return false;

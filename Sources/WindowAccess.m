@@ -134,6 +134,8 @@ static FSWindow *makeWindow(AXUIElementRef element, NSRunningApplication *app) {
     w.appName=app.localizedName?:app.bundleIdentifier;
     id title=readAX(element,kAXTitleAttribute);
     w.title=[title isKindOfClass:NSString.class]?title:@"";
+    id document=readAX(element,kAXDocumentAttribute);
+    w.document=[document isKindOfClass:NSString.class]?document:@"";
     return w;
 }
 
@@ -295,7 +297,7 @@ FSWindow *FSWindowAtPointWithChrome(CGPoint point, FSRect *visibleFrame,
     AXUIElementSetMessagingTimeout(axApp,.18);
     id windows=readAX(axApp,kAXWindowsAttribute);
     CFRelease(axApp);
-    FSWindow *best=nil;double bestScore=-1;
+    FSWindow *best=nil;double bestScore=-1,secondScore=-1;
     NSMutableArray *candidates=[NSMutableArray new];
     if([windows isKindOfClass:NSArray.class])[candidates addObjectsFromArray:windows];
     if(hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID()) {
@@ -311,31 +313,37 @@ FSWindow *FSWindowAtPointWithChrome(CGPoint point, FSRect *visibleFrame,
         pid_t pid=0;
         if(AXUIElementGetPid(ax,&pid)!=kAXErrorSuccess || pid!=topPID)continue;
         FSWindow *window=makeWindow(ax,app);FSRect frame;
-        if(![window isUsable] || ![window readFrame:&frame] ||
-           !FSVisibleFrameMatch(frame,cgFrame))continue;
-        double intersection=FSIntersectionArea(frame,cgFrame);
-        double score=intersection/(frame.width*frame.height+cgFrame.width*cgFrame.height-intersection);
-        if(hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
-           CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)element))score+=1;
-        if(score>bestScore){best=window;bestScore=score;}
+        if(![window isUsable] || ![window readFrame:&frame])continue;
+        BOOL direct=hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
+            CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)element);
+        /* The WindowServer rectangle can differ from AX's frame, especially
+           around toolbars. A system AX hit identifies the window directly;
+           otherwise require a clear overlap with the front CG row of its PID. */
+        double score=FSDragWindowMatchScore(frame,cgFrame,direct);
+        if(score<0)continue;
+        if(score>bestScore){secondScore=bestScore;best=window;bestScore=score;}
+        else if(score>secondScore)secondScore=score;
     }
+    if(bestScore<2 && secondScore>=0 && bestScore-secondScore<.15)best=nil;
     if(!best) {
-        /* Some apps expose a focused AXWindow but their CG bounds cover only
-           part of that window. Permit a conservative focused-window fallback;
-           the caller still requires a top-band origin and observed movement. */
+        /* Focus is a fallback only when it corroborates the CG owner's PID
+           and overlaps its visible frame. */
         FSWindow *focused=FSFocusedWindow(topPID);FSRect frame;
-        double visibleArea=cgFrame.width*cgFrame.height;
-        if(focused && [focused readFrame:&frame] && visibleArea>0 &&
-           FSIntersectionArea(frame,cgFrame)/visibleArea>=.8 &&
-           fmin(frame.width,cgFrame.width)/fmax(frame.width,cgFrame.width)>=.6)best=focused;
+        double smaller=focused && [focused readFrame:&frame]?
+            fmin(frame.width*frame.height,cgFrame.width*cgFrame.height):0;
+        if(smaller>0 && FSIntersectionArea(frame,cgFrame)/smaller>=.25)best=focused;
     }
     BOOL matchedHit=hitWindow && CFGetTypeID((__bridge CFTypeRef)hitWindow)==AXUIElementGetTypeID() &&
         best && CFEqual((__bridge CFTypeRef)hitWindow,(__bridge CFTypeRef)best.element);
     if(hit)CFRelease(hit);
     if(!best) {
-        if(reason)*reason=@"已看到鼠标下的窗口，但无法匹配可调整的辅助功能窗口；请确认不是全屏或弹窗";
+        if(reason)*reason=[NSString stringWithFormat:@"鼠标下窗口 PID %d；AX 命中%@；未找到该进程中可调整且边界重合的普通窗口",topPID,
+            result==kAXErrorSuccess?@"成功": [NSString stringWithFormat:@"失败(%d)",result]];
         return nil;
     }
+    FSRect axFrame;
+    if(visibleFrame && [best readFrame:&axFrame] &&
+       FSDragUseAXTitleFrame(axFrame,cgFrame,point.x,point.y)) *visibleFrame=axFrame;
     if(plainChrome && matchedHit)
         *plainChrome=[role isEqual:(__bridge NSString *)kAXWindowRole] ||
                      [role isEqual:(__bridge NSString *)kAXToolbarRole] ||

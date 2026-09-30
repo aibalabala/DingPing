@@ -30,8 +30,8 @@ jobs:
           app="$RUNNER_TEMP/DingPing-build/定屏.app"
           codesign --verify --deep --strict "$app"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = local.dingping.fixedsplit
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = 0.5.9
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = 16
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = 0.6.0
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = 17
           test -x "$app/Contents/Resources/修复定屏授权.command"
           bash -n "$app/Contents/Resources/修复定屏授权.command"
           cmp Installer/repair_accessibility.command "$app/Contents/Resources/修复定屏授权.command"
@@ -79,10 +79,10 @@ jobs:
           with open(path, 'wb') as target:
               plistlib.dump(bundles, target)
           PY
-          pkg="$GITHUB_WORKSPACE/dist/DingPing-v0.5.9-macOS-arm64.pkg"
+          pkg="$GITHUB_WORKSPACE/dist/DingPing-v0.6.0-macOS-arm64.pkg"
           pkgbuild --root "$payload" --install-location / --ownership recommended \
             --component-plist "$component" \
-            --identifier local.dingping.fixedsplit.installer --version 0.5.9 \
+            --identifier local.dingping.fixedsplit.installer --version 0.6.0 \
             --scripts "$scripts" "$pkg"
           pkgutil --payload-files "$pkg" | grep -F 'Applications/定屏.app/Contents/MacOS/DingPing'
           expanded="$RUNNER_TEMP/DingPing-pkg-expanded"
@@ -99,14 +99,14 @@ jobs:
           ditto "$RUNNER_TEMP/DingPing-build/定屏.app" "$staging/.安装资源/定屏.app"
           test -d "$staging/.安装资源/定屏.app"
           test ! -e "$staging/定屏.app"
-          cp dist/DingPing-v0.5.9-macOS-arm64.pkg "$staging/双击安装定屏.pkg"
+          cp dist/DingPing-v0.6.0-macOS-arm64.pkg "$staging/双击安装定屏.pkg"
           cp Installer/install_prebuilt.command "$staging/高级安装/双击安装预编译版.command"
           chmod 755 "$staging/高级安装/双击安装预编译版.command"
           cp Installer/common.sh "$staging/.dingping-install.sh"
           cp Installer/repair_accessibility.command "$staging/高级安装/双击修复定屏授权.command"
           chmod 755 "$staging/高级安装/双击修复定屏授权.command"
           cat > "$staging/安装说明.txt" <<'GUIDE'
-          定屏 v0.5.9（构建 16）· Apple Silicon DMG
+          定屏 v0.6.0（构建 17）· Apple Silicon DMG
 
           1. 请先从菜单栏退出定屏，再双击“双击安装定屏.pkg”，按图形界面安装。
              新版安装到 /Applications/定屏.app。已验证的个人 Applications 旧副本
@@ -119,8 +119,8 @@ jobs:
           macOS 可能要求在 Finder 中按住 Control 点击安装包并选“打开”。
           如诊断路径显示 /AppTranslocation/，请退出临时副本，运行安装包。
           GUIDE
-          dmg="$GITHUB_WORKSPACE/dist/DingPing-v0.5.9-macOS-arm64.dmg"
-          hdiutil create -volname '定屏 v0.5.9' -srcfolder "$staging" -format UDZO -ov "$dmg"
+          dmg="$GITHUB_WORKSPACE/dist/DingPing-v0.6.0-macOS-arm64.dmg"
+          hdiutil create -volname '定屏 v0.6.0' -srcfolder "$staging" -format UDZO -ov "$dmg"
           verified=0
           for attempt in 1 2 3 4 5; do
             if hdiutil verify "$dmg"; then verified=1; break; fi
@@ -133,7 +133,7 @@ jobs:
       - name: Upload download artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DingPing-v0.5.9-macOS-arm64
+          name: DingPing-v0.6.0-macOS-arm64
           path: |
             dist/*.dmg
             dist/*.pkg
@@ -141,22 +141,24 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish first successful v0.5.9 build
+      - name: Publish first successful v0.6.0 build
         if: github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag=v0.5.9
+          tag=v0.6.0
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag exists. Keep its signed DMG unchanged; this run is available as an Actions artifact."
             exit 0
           fi
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          定屏 v0.5.9（构建 16），适用于 Apple Silicon Mac，要求 macOS 13 或更新版本。
+          定屏 v0.6.0（构建 17），适用于 Apple Silicon Mac，要求 macOS 13 或更新版本。
 
-          修复旧的未固定窗口记录占住分区空格：选择布局时用当前可调整的窗口补齐。窗口调整请求会在随后核对实际位置；诊断分别显示存档、找到的窗口、目标及实际坐标和等待/暂停状态。拖动判定若因菜单或模式变化取消，会显示原因。
+          重做固定目标和临时占位的分配：固定的 Chrome、Code 等窗口暂时找不到时，目标屏其他普通窗口可填满分区，但固定记录不丢失；目标回来后优先收回原位。运行期间保留真实 AX 窗口身份，重启后仅在文档、标题或唯一应用窗口可辨认时恢复。诊断会区分固定目标和临时补位，并解释多窗口歧义。
+
+          拖动起点优先使用系统辅助功能的直接命中，并与最前方窗口进程核对；窗口服务器与辅助功能边界不一致时支持清晰的重合匹配。分区换人时取消旧窗口的延迟校验，避免错误暂停新占位。核心分配和拖动匹配规则有新增回归测试。
 
           可直接下载 .pkg，双击后按图形界面安装；DMG 双击只会挂载，再双击其中的“双击安装定屏.pkg”。安装到 /Applications，已验证的 ~/Applications 旧副本在新版核验通过后移到废纸篓，布局设置保留。若辅助功能开关绑定了旧路径，请在应用内按提示重新添加 /Applications/定屏.app。
 
@@ -164,5 +166,5 @@ jobs:
           NOTES
           gh release create "$tag" dist/*.dmg dist/*.pkg dist/*.sha256 \
             --target "$GITHUB_SHA" \
-            --title '定屏 v0.5.9 · macOS Apple Silicon DMG' \
+            --title '定屏 v0.6.0 · macOS Apple Silicon DMG' \
             --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -12,7 +12,8 @@ int main(void) {
     assert(FSPlacementChooseSlot(&state,2,-1,3)==1); /* New chat replaces right. */
     assert(FSPlacementChooseSlot(&state,2,0,3)==0); /* Browser returns left. */
     assert(FSPlacementChooseSlot(&state,2,1,1)==1); /* Minimized doc keeps its slot. */
-    assert(FSPlacementChooseAvailableSlot(&state,2,-1,0,1)==1); /* Closed pinned slot stays reserved. */
+    assert(FSPlacementChooseAvailableSlot(&state,2,-1,0,1)==1); /* Present owner stays reserved. */
+    assert(FSPlacementChooseAvailableSlot(&state,2,-1,0,0)==0); /* Missing owner can be borrowed. */
     assert(FSPlacementChooseAvailableSlot(&state,2,0,3,1)==1); /* Old history cannot evict pin. */
     assert(FSPlacementChooseAvailableSlot(&state,2,-1,3,3)==-1); /* No replaceable slot. */
     assert(FSPlacementChooseAvailableSlot(&state,4,-1,15,11u)==2);

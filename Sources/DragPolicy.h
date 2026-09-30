@@ -14,6 +14,10 @@ bool FSTitleCandidate(FSRect window, double x, double y);
 bool FSPassiveDragCandidate(FSRect window, double x, double y);
 /* AX window frames and WindowServer bounds need not be pixel-identical. */
 bool FSVisibleFrameMatch(FSRect axWindow, FSRect visibleWindow);
+/* The AX hit is authoritative when its PID matches the front CG row; without
+   one, only accept a clear overlap. Negative means no match. */
+double FSDragWindowMatchScore(FSRect axWindow, FSRect visibleWindow, bool directHit);
+bool FSDragUseAXTitleFrame(FSRect axWindow, FSRect visibleWindow, double x, double y);
 
 typedef enum { FSDropIgnore, FSDropBlocked, FSDropMove, FSDropSwap, FSDropReplace } FSDropAction;
 /* A genuine title-bar translation can change assignments; resizing cannot. */

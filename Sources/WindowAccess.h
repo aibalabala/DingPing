@@ -8,6 +8,7 @@
 @property(nonatomic,copy) NSString *bundleID;
 @property(nonatomic,copy) NSString *appName;
 @property(nonatomic,copy) NSString *title;
+@property(nonatomic,copy) NSString *document;
 - (AXUIElementRef)ax;
 - (BOOL)readFrame:(FSRect *)frame;
 - (BOOL)isUsable;
